@@ -1,7 +1,7 @@
 # dagster-compass-kit
 
-Community-supported Dagster integration for **Dagster+ Compass** — resource,
-hooks, checks, sensors, and components for using Compass inside your pipelines.
+A Dagster integration for **Dagster+ Compass** — resource, hooks, checks,
+sensors, and components for using Compass inside your pipelines.
 
 > **Dagster+ Compass only.** This kit talks to the Compass embedded in Dagster+
 > at `wss://<org>.dagster.cloud/<deployment>/graphql`, authenticated with a
@@ -10,7 +10,8 @@ hooks, checks, sensors, and components for using Compass inside your pipelines.
 > Dagster+ operational data (run history, materialization stats, check
 > results) — it knows your pipelines, not arbitrary customer datasets.
 
-Not affiliated with or officially supported by Dagster Labs.
+A personal project by [Eric Thomas](https://github.com/eric-thomas-dagster). Not
+an official Dagster Labs product.
 
 ## What you get
 

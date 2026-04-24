@@ -1,11 +1,11 @@
 [project]
 name = "dagster-compass-kit"
 version = "0.2.0"
-description = "Community-supported Dagster integration for Dagster+ Compass: resource, hooks, and components for using Compass inside pipelines."
+description = "A Dagster integration for Dagster+ Compass: resource, hooks, checks, sensors, and components for using Compass inside pipelines."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
-authors = [{ name = "Community" }]
+authors = [{ name = "Eric Thomas" }]
 keywords = ["dagster", "compass", "llm", "ai", "pipelines"]
 classifiers = [
     "Framework :: Dagster",

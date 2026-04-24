@@ -1,4 +1,4 @@
-"""Community-supported Dagster+ Compass integration for Dagster pipelines.
+"""Dagster+ Compass integration for Dagster pipelines.
 
 Dagster+-Compass-specific: the kit hits the WebSocket subscription at your
 ``<org>.dagster.cloud`` tenant with a Dagster+ API token. Not a client for
