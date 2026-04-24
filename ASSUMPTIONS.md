@@ -186,22 +186,26 @@ silently degrades to the old behavior. To turn it off entirely:
 compass_create_issue_on_failure(dedup=False)
 ```
 
-### 5c. Dagster+ alert policies can filter asset observation events by metadata
+### 5c. Dagster+ alert policies fire per-event on asset check failures
 
-The cascade classifier (`compass_classify_cascade_on_failure`) writes
-its verdict as **event metadata** on AssetObservation events, not as
-asset-definition tags. The alert-fatigue use case only works if
-Dagster+ AlertPolicies can:
+The cascade classifier emits **runless AssetCheckEvaluation** events
+(not AssetObservations) named `compass_root_cause_detected`. Root
+causes emit with `passed=False`, cascades with `passed=True`.
 
-1. Fire on AssetObservation events (not just materialization events).
-2. Filter those events by a predicate on event metadata (e.g.
-   `compass_root_cause == true`).
+This design relies on two Dagster+ capabilities, both verified April 2026:
 
-**User-confirmed April 2026** that this filtering surface exists in
-Dagster+. If your deployment is on a version that predates that
-capability, the cascade classifier still emits the observations and
-tags the run — but the alert-suppression benefit won't materialize
-until you're on a version with metadata-filterable alert policies.
+1. Asset checks can be reported runlessly for assets that don't
+   have a check pre-declared in user code. Confirmed: the evaluation
+   lands in the asset's check history with the expected status.
+2. Dagster+ AlertPolicies on asset check failures fire per-event and
+   pass evaluation metadata through to the notification payload. User
+   confirmed that observation-based alerts are aggregate-only, which
+   is why this feature uses checks instead.
+
+If either capability is absent on a given tenant, the classifier still
+classifies correctly — but the alert-fatigue benefit won't materialize
+until the tenant is on a version that supports per-event check-failure
+alerts.
 
 ### 6. Tool surface observed
 

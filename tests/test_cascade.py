@@ -7,8 +7,9 @@ these tests verify shape, topology rules, and the graceful-fallback paths.
 
 import pytest
 from dagster import (
+    AssetCheckEvaluation,
+    AssetCheckSeverity,
     AssetKey,
-    AssetObservation,
     DagsterInstance,
     Definitions,
     MetadataValue,
@@ -23,7 +24,7 @@ from dagster_compass_kit import (
     compass_classify_cascade_on_failure,
     enrich_explanation_via_compass,
 )
-from dagster_compass_kit.cascade import _emit_classification_observations
+from dagster_compass_kit.cascade import _emit_classification_check_evaluations
 
 
 # ── Schema smoke ────────────────────────────────────────────────────────────
@@ -58,10 +59,10 @@ def test_sensor_factory_returns_sensor():
     assert sensor.name == "compass_cascade_classifier"
 
 
-def test_sensor_factory_accepts_custom_name_and_metadata_keys():
+def test_sensor_factory_accepts_custom_check_name_and_metadata_key():
     sensor = compass_classify_cascade_on_failure(
         name="my_cascade",
-        root_cause_metadata_key="is_root_cause",
+        check_name="my_check",
         cascade_metadata_key="suppressed_by",
     )
     assert sensor.name == "my_cascade"
@@ -198,7 +199,7 @@ def test_deterministic_explanation_mentions_root_when_single():
 # ── Observation emission ────────────────────────────────────────────────────
 
 
-def test_emit_classification_observations_writes_one_obs_per_asset():
+def test_emit_classification_check_evaluations_writes_one_eval_per_asset():
     instance = DagsterInstance.ephemeral()
     diagnosis = CascadeDiagnosis(
         root_cause_asset_keys=["analytics/orders"],
@@ -206,7 +207,7 @@ def test_emit_classification_observations_writes_one_obs_per_asset():
         explanation="Snowflake auth expired mid-run.",
     )
 
-    captured: list[AssetObservation] = []
+    captured: list[AssetCheckEvaluation] = []
     original = instance.report_runless_asset_event
 
     def _capture(event):
@@ -215,29 +216,38 @@ def test_emit_classification_observations_writes_one_obs_per_asset():
 
     instance.report_runless_asset_event = _capture  # type: ignore[method-assign]
 
-    root, cascade = _emit_classification_observations(
+    root, cascade = _emit_classification_check_evaluations(
         instance,
         diagnosis,
         run_id="run-abc",
         chat_id=12345,
-        root_cause_metadata_key="compass_root_cause",
+        check_name="compass_root_cause_detected",
         cascade_metadata_key="compass_cascade_of",
     )
     assert root == 1
     assert cascade == 2
     assert len(captured) == 3
 
-    root_obs = next(o for o in captured if o.asset_key == AssetKey(["analytics", "orders"]))
-    cascade_obs = next(
-        o for o in captured if o.asset_key == AssetKey(["analytics", "orders_by_day"])
+    root_eval = next(
+        e for e in captured if e.asset_key == AssetKey(["analytics", "orders"])
     )
-    # Encoded as int (1/0) not bool — see cascade.py for why.
-    assert root_obs.metadata["compass_root_cause"] == MetadataValue.int(1)
-    assert cascade_obs.metadata["compass_root_cause"] == MetadataValue.int(0)
-    assert cascade_obs.metadata["compass_cascade_of"] == MetadataValue.text(
+    cascade_eval = next(
+        e for e in captured if e.asset_key == AssetKey(["analytics", "orders_by_day"])
+    )
+
+    # Root cause: failed check. This is the event the AlertPolicy pages on.
+    assert root_eval.passed is False
+    assert root_eval.severity == AssetCheckSeverity.ERROR
+    assert root_eval.check_name == "compass_root_cause_detected"
+    assert root_eval.metadata["compass_chat_id"] == MetadataValue.int(12345)
+
+    # Cascade: passed check, WARN severity. Recorded but doesn't page.
+    assert cascade_eval.passed is True
+    assert cascade_eval.severity == AssetCheckSeverity.WARN
+    assert cascade_eval.check_name == "compass_root_cause_detected"
+    assert cascade_eval.metadata["compass_cascade_of"] == MetadataValue.text(
         "analytics/orders"
     )
-    assert root_obs.metadata["compass_chat_id"] == MetadataValue.int(12345)
 
 
 def test_emit_classification_with_no_chat_id_omits_field():
@@ -247,15 +257,15 @@ def test_emit_classification_with_no_chat_id_omits_field():
         explanation="…",
     )
 
-    captured: list[AssetObservation] = []
+    captured: list[AssetCheckEvaluation] = []
     instance.report_runless_asset_event = lambda e: captured.append(e)  # type: ignore[method-assign]
 
-    _emit_classification_observations(
+    _emit_classification_check_evaluations(
         instance,
         diagnosis,
         run_id="run-abc",
         chat_id=None,
-        root_cause_metadata_key="compass_root_cause",
+        check_name="compass_root_cause_detected",
         cascade_metadata_key="compass_cascade_of",
     )
     assert len(captured) == 1

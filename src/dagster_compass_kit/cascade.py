@@ -45,8 +45,9 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from dagster import (
+    AssetCheckEvaluation,
+    AssetCheckSeverity,
     AssetKey,
-    AssetObservation,
     DagsterEventType,
     MetadataValue,
     RunFailureSensorContext,
@@ -258,18 +259,24 @@ def classify_cascade_for_run(
         return diagnosis, None
 
 
-def _emit_classification_observations(
+def _emit_classification_check_evaluations(
     instance: Any,
     diagnosis: CascadeDiagnosis,
     *,
     run_id: str,
     chat_id: Optional[int],
-    root_cause_metadata_key: str,
+    check_name: str,
     cascade_metadata_key: str,
 ) -> tuple[int, int]:
-    """Emit one AssetObservation per affected asset carrying the classification.
+    """Emit one AssetCheckEvaluation per affected asset.
 
-    Returns (root_count, cascade_count) actually emitted.
+    - Root-cause assets: ``passed=False, severity=ERROR`` — this is the
+      event Dagster+ AlertPolicies fire on. One page per root cause.
+    - Cascade assets: ``passed=True, severity=WARN`` — recorded on the
+      asset's check history for post-mortems / dashboards, but doesn't
+      trigger the failure-based alert.
+
+    Returns ``(root_count, cascade_count)`` actually emitted.
     """
     common: dict[str, Any] = {
         "compass_explanation": MetadataValue.text(diagnosis.explanation),
@@ -281,19 +288,15 @@ def _emit_classification_observations(
 
     root_count = 0
     for key_str in diagnosis.root_cause_asset_keys:
-        metadata = {
-            **common,
-            # Encoded as int 1/0 rather than bool so Dagster+ AlertPolicies
-            # that only support aggregate filters (sum / max / count) can
-            # threshold on it: `sum(compass_root_cause) > 0 in window`.
-            root_cause_metadata_key: MetadataValue.int(1),
-        }
-        obs = AssetObservation(
+        evaluation = AssetCheckEvaluation(
             asset_key=AssetKey.from_user_string(key_str),
+            check_name=check_name,
+            passed=False,
+            severity=AssetCheckSeverity.ERROR,
+            metadata=dict(common),
             description="Compass classified this asset as the root cause of a run failure.",
-            metadata=metadata,
         )
-        instance.report_runless_asset_event(obs)
+        instance.report_runless_asset_event(evaluation)
         root_count += 1
 
     cascade_count = 0
@@ -301,18 +304,20 @@ def _emit_classification_observations(
     for key_str in diagnosis.cascade_asset_keys:
         metadata = {
             **common,
-            root_cause_metadata_key: MetadataValue.int(0),
             cascade_metadata_key: MetadataValue.text(roots_joined),
         }
-        obs = AssetObservation(
+        evaluation = AssetCheckEvaluation(
             asset_key=AssetKey.from_user_string(key_str),
+            check_name=check_name,
+            passed=True,
+            severity=AssetCheckSeverity.WARN,
+            metadata=metadata,
             description=(
                 "Compass classified this asset as downstream of a failed upstream; "
                 "it did not run independently."
             ),
-            metadata=metadata,
         )
-        instance.report_runless_asset_event(obs)
+        instance.report_runless_asset_event(evaluation)
         cascade_count += 1
 
     return root_count, cascade_count
@@ -321,49 +326,52 @@ def _emit_classification_observations(
 def compass_classify_cascade_on_failure(
     *,
     name: str = "compass_cascade_classifier",
-    root_cause_metadata_key: str = "compass_root_cause",
+    check_name: str = "compass_root_cause_detected",
     cascade_metadata_key: str = "compass_cascade_of",
     monitored_jobs: Optional[list[Any]] = None,
 ):
-    """Return a ``@run_failure_sensor`` that classifies and tags cascades.
+    """Return a ``@run_failure_sensor`` that classifies cascades via asset checks.
 
     On every run failure:
 
-    1. Walk the run's event log for planned assets vs materialized assets.
+    1. Walk the run's event log for planned vs materialized assets.
        The delta is the set of affected assets (failed outright or
        skipped due to upstream failure).
-    2. Ask Compass to classify each affected asset as root-cause or
-       cascade. Single ~30s Compass call per failed run.
-    3. Emit an ``AssetObservation`` for each affected asset with
-       classification metadata:
+    2. Classify each deterministically from the asset graph: root cause
+       vs cascade. 100% accurate, no LLM call required.
+    3. Optionally enrich the explanation via Compass (single ~30s call,
+       skipped gracefully if Compass is unavailable).
+    4. Emit an ``AssetCheckEvaluation`` per affected asset:
 
-       - ``compass_root_cause`` (bool) — True for root causes, False for
-         cascades. This is the field Dagster+ alert policies should
-         filter on.
-       - ``compass_cascade_of`` (text, cascade-side only) — comma-joined
-         root cause asset keys for traceability.
-       - ``compass_explanation``, ``compass_cascade_size``,
-         ``compass_run_id``, ``compass_chat_id`` — for the on-call.
+       - **Root cause** — ``passed=False, severity=ERROR``. This is the
+         event Dagster+ AlertPolicies fire on. Each cascade run pages
+         exactly once, on the root cause, with Compass's explanation
+         attached.
+       - **Cascade** — ``passed=True, severity=WARN``. Lands on the
+         asset's check history for post-mortems and dashboards, but
+         doesn't trigger the failure-based alert.
 
-    **Downstream:** configure a Dagster+ AlertPolicy on
-    AssetObservation events (not materialization-failure events) and
-    filter event metadata ``compass_root_cause == true`` to route only
-    root-cause alerts.
+    **Why asset checks, not observations:** Dagster+ AlertPolicies on
+    asset observations are aggregate-over-window only — no per-event
+    trigger, no individual-metadata filtering. AlertPolicies on asset
+    check failures *are* per-event and carry the evaluation's metadata
+    in the alert payload. One holistic policy ("page on any
+    ``compass_root_cause_detected`` failure") replaces asset-by-asset
+    or job-by-job alert configuration.
 
     **Resource wiring:** the Compass resource must be registered under
-    the key ``compass`` in ``Definitions.resources``. Modern Dagster
-    sensors bind resources by parameter name, and ``run_failure_sensor``
-    doesn't expose a configurable ``required_resource_keys`` kwarg — so
-    the key is fixed. If you need a different key, build your own
-    sensor with :func:`classify_cascade_for_run`.
+    the key ``compass`` in ``Definitions.resources``. ``run_failure_sensor``
+    binds resources by type-annotated parameter name. If you need a
+    different key, build your own sensor with
+    :func:`classify_cascade_for_run`.
 
     Args:
         name: Sensor name as it appears in Dagster+.
-        root_cause_metadata_key: Metadata field name the alert policy
-            will filter on. Override only if it collides with an
-            existing metadata convention in your deployment.
+        check_name: The asset check name carried on each evaluation.
+            Configure your AlertPolicy to match on this name. Default
+            ``compass_root_cause_detected``.
         cascade_metadata_key: Metadata field name carrying the
-            root-cause back-pointer on cascade observations.
+            root-cause back-pointer on cascade-side evaluations.
         monitored_jobs: Restrict to specific jobs. ``None`` means all.
     """
 
@@ -412,19 +420,19 @@ def compass_classify_cascade_on_failure(
             return SkipReason("No cascade classification produced.")
 
         try:
-            root_count, cascade_count = _emit_classification_observations(
+            root_count, cascade_count = _emit_classification_check_evaluations(
                 instance,
                 diagnosis,
                 run_id=run_id,
                 chat_id=chat_id,
-                root_cause_metadata_key=root_cause_metadata_key,
+                check_name=check_name,
                 cascade_metadata_key=cascade_metadata_key,
             )
         except Exception as e:  # noqa: BLE001
             context.log.warning(
-                f"compass_cascade_classifier: failed to emit observations: {e!r}"
+                f"compass_cascade_classifier: failed to emit check evaluations: {e!r}"
             )
-            return SkipReason(f"Observation emit failed: {e!r}")
+            return SkipReason(f"Check evaluation emit failed: {e!r}")
 
         context.log.info(
             f"compass_cascade_classifier: run {run_id} → "
