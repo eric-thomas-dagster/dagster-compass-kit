@@ -220,14 +220,14 @@ On every failed run the sensor:
    configured or errors, a generic deterministic explanation is used
    and the sensor moves on.
 4. Emits an `AssetObservation` on each affected asset carrying
-   `compass_root_cause: true|false` as **event metadata** (plus
+   `compass_root_cause: 1|0` as **event metadata** (plus
    `compass_explanation`, `compass_run_id`, `compass_chat_id` when
    Compass was involved).
 
 Then, in Dagster+:
 
 1. Create an AlertPolicy on **asset observation** events.
-2. Filter event metadata to `compass_root_cause == true`.
+2. Filter event metadata to `sum(compass_root_cause) > 0`.
 3. Route as normal. Demote or remove the naive all-asset-failure alert.
 
 The 40-asset cascade now pages **once** — on the root cause — with

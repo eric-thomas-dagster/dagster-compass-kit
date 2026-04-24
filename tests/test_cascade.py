@@ -231,8 +231,9 @@ def test_emit_classification_observations_writes_one_obs_per_asset():
     cascade_obs = next(
         o for o in captured if o.asset_key == AssetKey(["analytics", "orders_by_day"])
     )
-    assert root_obs.metadata["compass_root_cause"] == MetadataValue.bool(True)
-    assert cascade_obs.metadata["compass_root_cause"] == MetadataValue.bool(False)
+    # Encoded as int (1/0) not bool — see cascade.py for why.
+    assert root_obs.metadata["compass_root_cause"] == MetadataValue.int(1)
+    assert cascade_obs.metadata["compass_root_cause"] == MetadataValue.int(0)
     assert cascade_obs.metadata["compass_cascade_of"] == MetadataValue.text(
         "analytics/orders"
     )

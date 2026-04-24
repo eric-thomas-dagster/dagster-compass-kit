@@ -283,7 +283,10 @@ def _emit_classification_observations(
     for key_str in diagnosis.root_cause_asset_keys:
         metadata = {
             **common,
-            root_cause_metadata_key: MetadataValue.bool(True),
+            # Encoded as int 1/0 rather than bool so Dagster+ AlertPolicies
+            # that only support aggregate filters (sum / max / count) can
+            # threshold on it: `sum(compass_root_cause) > 0 in window`.
+            root_cause_metadata_key: MetadataValue.int(1),
         }
         obs = AssetObservation(
             asset_key=AssetKey.from_user_string(key_str),
@@ -298,7 +301,7 @@ def _emit_classification_observations(
     for key_str in diagnosis.cascade_asset_keys:
         metadata = {
             **common,
-            root_cause_metadata_key: MetadataValue.bool(False),
+            root_cause_metadata_key: MetadataValue.int(0),
             cascade_metadata_key: MetadataValue.text(roots_joined),
         }
         obs = AssetObservation(

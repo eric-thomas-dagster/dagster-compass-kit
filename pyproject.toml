@@ -1,6 +1,6 @@
 [project]
 name = "dagster-compass-kit"
-version = "0.3.1"
+version = "0.3.2"
 description = "A Dagster integration for Dagster+ Compass: resource, hooks, checks, sensors, and components for using Compass inside pipelines."
 readme = "README.md"
 requires-python = ">=3.10"
