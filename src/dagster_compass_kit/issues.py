@@ -191,12 +191,21 @@ def draft_issue_for_failure(
     run_id: str,
     step_key: str,
     exc: BaseException,
-) -> Optional[IssueDraft]:
+) -> tuple[Optional[IssueDraft], Optional[int]]:
     """Ask Compass to draft an ``IssueDraft`` for a pipeline failure.
 
-    Returns ``None`` if Compass errors or its response can't be parsed into
-    the schema. The caller should treat ``None`` as "draft failed, skip
-    Issue creation, original exception still stands."
+    Runs the drafting inside a ``CompassConversation`` so the server-assigned
+    ``chat_id`` is captured — the issue-creation path can then pass it to
+    ``createIssue(chatId: ...)`` to link the issue back to the exact
+    Compass conversation that generated it. Full provenance: *"something
+    broke → Compass analyzed it (chat 16525) → issue #42 filed."*
+
+    Returns ``(draft, chat_id)``. Either can be ``None``:
+      - ``(None, None)`` — Compass unreachable / errored before any response
+      - ``(None, N)`` — Compass answered but the response wasn't parseable
+      - ``(draft, None)`` — drafted successfully but the chat_id wasn't returned
+        (shouldn't happen in practice; kept permissive)
+      - ``(draft, N)`` — happy path
     """
     prompt = _ISSUE_PROMPT_TEMPLATE.format(
         job_name=job_name,
@@ -206,11 +215,14 @@ def draft_issue_for_failure(
         exc_message=str(exc)[:500],
     )
     try:
-        return compass.ask_structured(prompt, schema=IssueDraft)
-    except CompassSchemaError:
-        return None
+        with compass.conversation() as chat:
+            try:
+                draft = chat.ask_structured(prompt, schema=IssueDraft)
+                return draft, (chat.chat_id or None)
+            except CompassSchemaError:
+                return None, (chat.chat_id or None)
     except Exception:  # noqa: BLE001 - never let a broken Compass mask the real failure
-        return None
+        return None, None
 
 
 # ── Creation paths ───────────────────────────────────────────────────────────
@@ -429,7 +441,7 @@ def compass_create_issue_on_failure(
         compass: CompassResource = getattr(context.resources, resource_key)
 
         exc = context.op_exception or RuntimeError("unknown failure")
-        draft = draft_issue_for_failure(
+        draft, chat_id = draft_issue_for_failure(
             compass,
             job_name=context.job_name,
             run_id=context.run_id,
@@ -444,6 +456,11 @@ def compass_create_issue_on_failure(
             )
             return
 
+        if chat_id:
+            context.log.info(
+                f"compass_create_issue_on_failure: drafted via Compass chat {chat_id}"
+            )
+
         created = False
         detail = ""
 
@@ -453,6 +470,7 @@ def compass_create_issue_on_failure(
                 compass,
                 draft,
                 context.run_id,
+                chat_id=chat_id,
                 custom_spec=custom_mutation_spec,
             )
             if created:
@@ -495,14 +513,14 @@ def compass_create_issue_on_failure(
                 # Tags are length-limited — store a short pointer and put the
                 # full draft in the run's event log via the logger.
                 short_tag = (draft.title or "")[:180]
-                instance.add_run_tags(
-                    context.run_id,
-                    {
-                        "dagster-compass/issue_draft_title": short_tag,
-                        "dagster-compass/issue_draft_severity": draft.severity,
-                        "dagster-compass/issue_created": "true" if created else "false",
-                    },
-                )
+                tags = {
+                    "dagster-compass/issue_draft_title": short_tag,
+                    "dagster-compass/issue_draft_severity": draft.severity,
+                    "dagster-compass/issue_created": "true" if created else "false",
+                }
+                if chat_id:
+                    tags["dagster-compass/compass_chat_id"] = str(chat_id)
+                instance.add_run_tags(context.run_id, tags)
             except Exception as e:  # noqa: BLE001
                 context.log.warning(f"compass_create_issue_on_failure: tag attach failed: {e!r}")
 
