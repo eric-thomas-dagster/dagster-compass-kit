@@ -9,19 +9,18 @@ Example ``component.yaml``::
       prompt: |
         Summarize yesterday's pipeline activity across this deployment.
         Call out the most failed jobs, slowest materializations, and any
-        unusual patterns. Format as markdown suitable for a Slack post.
-      slack_channel: "#data-standup"   # optional
+        unusual patterns. Format as markdown.
       resource_key: compass
 
-The component generates: an asset (the digest body materialized as markdown
-metadata), a schedule that fires that asset, and — if ``slack_channel`` is
-set — a post to Slack on each successful materialization.
+The component generates an asset (the digest body materialized as markdown
+metadata), a job that materializes it, and a schedule that fires the job.
+The asset lives in the Dagster+ catalog like any other — Dagster+'s own
+alerting / sharing mechanisms surface it from there.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 
 import dagster as dg
 from dagster.components import Component, ComponentLoadContext, Resolvable
@@ -42,9 +41,6 @@ class DailyInsightDigest(Component, Resolvable):
     cron_schedule: str = "0 9 * * *"
     """When to materialize the digest. Defaults to 9am daily."""
 
-    slack_channel: Optional[str] = None
-    """Optional Slack channel to post the digest into on materialization."""
-
     resource_key: str = "compass"
     """Resource key that maps to a ``CompassResource`` in your Definitions."""
 
@@ -54,7 +50,6 @@ class DailyInsightDigest(Component, Resolvable):
     def build_defs(self, context: ComponentLoadContext) -> dg.Definitions:
         asset_key = dg.AssetKey(self.asset_key.split("/"))
         prompt = self.prompt
-        slack_channel = self.slack_channel
         resource_key = self.resource_key
         group_name = self.group_name
 
@@ -70,13 +65,6 @@ class DailyInsightDigest(Component, Resolvable):
             body = response.text or "(no digest returned)"
             if response.error:
                 body = f"(compass error: {response.error})\n\n{body}"
-
-            if slack_channel:
-                try:
-                    slack = asset_ctx.resources.slack  # type: ignore[attr-defined]
-                    slack.get_client().chat_postMessage(channel=slack_channel, text=body)
-                except Exception as e:  # noqa: BLE001
-                    asset_ctx.log.warning(f"DailyInsightDigest: Slack post failed: {e!r}")
 
             return dg.MaterializeResult(
                 metadata={

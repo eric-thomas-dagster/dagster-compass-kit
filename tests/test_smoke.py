@@ -43,5 +43,5 @@ def test_tool_call_shape():
 
 
 def test_hook_is_callable_and_returns_hook():
-    hook = compass_on_failure(slack_channel="#x")
+    hook = compass_on_failure()
     assert callable(hook)

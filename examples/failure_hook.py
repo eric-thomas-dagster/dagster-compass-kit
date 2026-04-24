@@ -1,7 +1,9 @@
 """A job whose failures are auto-summarized by Compass.
 
 If the op fails, the hook calls Compass with the failing context, attaches
-the summary to the run as metadata, and (if configured) posts to Slack.
+the summary to the run as metadata (tag). Dagster+'s existing Slack/email
+alerts link to the run page where the Compass summary renders — no need
+for this hook to send its own notification.
 """
 
 from dagster import Definitions, EnvVar, job, op
@@ -14,7 +16,7 @@ def flaky_op():
     raise RuntimeError("something upstream is unhappy")
 
 
-@job(hooks={compass_on_failure(slack_channel="#data-incidents")})
+@job(hooks={compass_on_failure()})
 def flaky_pipeline():
     flaky_op()
 
@@ -26,7 +28,5 @@ defs = Definitions(
             dagster_cloud_url=EnvVar("DAGSTER_CLOUD_URL"),
             api_token=EnvVar("DAGSTER_CLOUD_API_TOKEN"),
         ),
-        # Add a SlackResource here if you want the Slack post:
-        # "slack": SlackResource(token=EnvVar("SLACK_BOT_TOKEN")),
     },
 )

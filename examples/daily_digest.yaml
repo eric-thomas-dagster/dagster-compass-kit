@@ -1,7 +1,7 @@
 # Scaffold this under your project's components/ directory.
-# Your Definitions still needs to expose a `compass` (and optionally `slack`)
-# resource pointed at the target deployment — the component only generates
-# the asset + schedule, not the resources.
+# Your Definitions still needs to expose a `compass` resource pointed at
+# the target deployment — the component only generates the asset + schedule,
+# not the resource.
 type: dagster_compass_kit.DailyInsightDigest
 attributes:
   asset_key: analytics/daily_compass_digest
@@ -10,7 +10,6 @@ attributes:
     Summarize yesterday's pipeline activity across this deployment.
     Call out the most failed jobs, slowest materializations, and anything
     that's trending in an unusual direction. Keep it under 300 words.
-    Format as markdown suitable for a Slack post.
-  slack_channel: "#data-standup"
+    Format as markdown.
   resource_key: compass
   group_name: compass

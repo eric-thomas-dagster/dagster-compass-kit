@@ -3,6 +3,12 @@
 A Dagster integration for **Dagster+ Compass** — resource, hooks, checks,
 sensors, and components for using Compass inside your pipelines.
 
+**The core idea:** Compass already answers questions in the web UI and in
+Slack. This kit is about **persisting** those answers — turning them into
+Dagster assets, run metadata, asset checks, auto-filed Dagster+ Issues,
+and scheduled digests. Ephemeral AI output becomes a queryable, lineage-
+aware, catalog-backed artifact.
+
 > **Dagster+ Compass only.** This kit talks to the Compass embedded in Dagster+
 > at `wss://<org>.dagster.cloud/<deployment>/graphql`, authenticated with a
 > Dagster+ API token. It does **not** talk to standalone
@@ -19,7 +25,7 @@ an official Dagster Labs product.
 | --- | --- |
 | **`CompassResource`** | Ask Compass from any asset/op. `compass.ask(prompt)` returns prose; `compass.ask_structured(prompt, PydanticModel)` returns a typed object. |
 | **`compass.conversation()`** | Multi-turn chat — `chat_id` is preserved across `chat.ask(...)` calls so follow-ups stay coherent. |
-| **`compass_on_failure()` hook** | On op failure, Compass writes a post-mortem, attaches to run metadata, optionally posts to Slack. |
+| **`compass_on_failure()` hook** | On op failure, Compass writes a post-mortem and attaches it to run metadata. Dagster+'s existing Slack/email alerts link to the run page where it renders — this hook doesn't duplicate notifications. |
 | **`compass_create_issue_on_failure()` hook** | On op failure, Compass drafts a Dagster+ Issue (title + description + severity + labels) and opens it via `dg api issue create`, linked to the run. Zero manual triage — failures arrive as pre-filled issues in the Dagster+ UI. |
 | **`@compass_retry_advisor()` decorator** | On exception, Compass decides whether to retry (transient) or terminate (deterministic). |
 | **`compass_asset_check(...)`** | Natural-language asset checks — "is this materialization anomalous?" becomes a first-class Dagster check. |
@@ -65,7 +71,6 @@ itself; pick raw LLMs when the question is about anything else.**
 
 ```bash
 pip install dagster-compass-kit
-pip install 'dagster-compass-kit[slack]'       # + Slack posting
 pip install 'dagster-compass-kit[components]'  # + dagster-components YAML support
 ```
 
@@ -134,15 +139,15 @@ from dagster_compass_kit import compass_on_failure
 @op
 def orders_etl(): ...
 
-@job(hooks={compass_on_failure(slack_channel="#data-incidents")})
+@job(hooks={compass_on_failure()})
 def orders_pipeline():
     orders_etl()
 ```
 
 On op failure, Compass gets the job name, run id, and failing step; writes a
-summary grounded in recent history; attaches it as run metadata and posts to
-Slack. Silent-fails if Slack is down so a broken Slack never masks a real
-pipeline failure.
+summary grounded in recent history; attaches it as a run tag where Dagster+'s
+existing Slack/email alerts link. No parallel notifications — the kit
+enriches the run, the existing alert does the broadcasting.
 
 ## Quick start — Compass-decided retry
 
@@ -214,9 +219,16 @@ attributes:
   asset_key: analytics/daily_compass_digest
   cron_schedule: "0 9 * * *"
   prompt: Summarize yesterday's pipeline activity as markdown.
-  slack_channel: "#data-standup"
   resource_key: compass
 ```
+
+> **Why here and not in Slack?** Dagster+ Compass already has a Slack
+> integration that generates daily digests straight into a channel. This
+> kit exists for a different reason: **persistence**. The digest lands as
+> a Dagster asset in your catalog with a full materialization history —
+> queryable downstream, diffable week-over-week, composable with other
+> assets (feed it into an exec summary, an incident retro, a quarterly
+> review). A Slack message is ephemeral; a catalog asset is an artifact.
 
 ## What Compass can and can't answer
 
@@ -278,7 +290,7 @@ them against your own deployment. Highlights:
 See module docstrings for full parameter detail. Highlights:
 
 - `CompassResource(dagster_cloud_url=, api_token=, timeout_seconds=120)`
-- `compass_on_failure(prompt=, slack_channel=, resource_key=, metadata_key=)`
+- `compass_on_failure(prompt=, resource_key=, metadata_key=)`
 - `compass_retry_advisor(max_attempts=3, on_parse_failure='raise', wait_cap_seconds=120)`
 - `compass_asset_check(asset=, prompt=, severity_mapper=, blocking=False)`
 - `compass_sensor(job=, prompt=, minimum_interval_seconds=300, should_trigger=, default_status=STOPPED)`
