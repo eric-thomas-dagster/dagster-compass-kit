@@ -1,13 +1,14 @@
 # dagster-compass-kit
 
-Community-supported Dagster integration for **Dagster+ Compass** — a resource,
-hooks, and a component for using Compass inside your pipelines.
+Community-supported Dagster integration for **Dagster+ Compass** — resource,
+hooks, checks, sensors, and components for using Compass inside your pipelines.
 
-> Compass is an agentic LLM in Dagster+ that queries your operational data
-> (run history, materialization stats, check results) to answer natural-language
-> questions about your pipelines. This package exposes that surface
-> programmatically so you can call Compass from Dagster code the same way you'd
-> call any other resource.
+> **Dagster+ Compass only.** This kit talks to the Compass embedded in Dagster+
+> at `wss://<org>.dagster.cloud/<deployment>/graphql`, authenticated with a
+> Dagster+ API token. It does **not** talk to standalone
+> [compass.dagster.io](https://compass.dagster.io/). Compass queries live
+> Dagster+ operational data (run history, materialization stats, check
+> results) — it knows your pipelines, not arbitrary customer datasets.
 
 Not affiliated with or officially supported by Dagster Labs.
 
@@ -15,48 +16,70 @@ Not affiliated with or officially supported by Dagster Labs.
 
 | Piece | Use it for |
 | --- | --- |
-| `CompassResource` | Ask Compass questions from any asset/op. `compass.ask(prompt)` returns a `CompassResponse` with `.text`, `.tool_calls`, `.suggested_replies`. |
-| `compass_on_failure()` hook | Attach to a job/op; when a step fails, Compass writes a post-mortem automatically and stores it as run metadata (optionally posts to Slack). |
-| `@compass_retry_advisor()` decorator | On exception, asks Compass whether to retry based on recent run history for this deployment. Raises `RetryRequested` or `Failure` accordingly. |
-| `DailyInsightDigest` component | One-YAML-block declarative digest — generates an asset + schedule that materialize Compass's answer as markdown metadata each morning. |
+| **`CompassResource`** | Ask Compass from any asset/op. `compass.ask(prompt)` returns prose; `compass.ask_structured(prompt, PydanticModel)` returns a typed object. |
+| **`compass.conversation()`** | Multi-turn chat — `chat_id` is preserved across `chat.ask(...)` calls so follow-ups stay coherent. |
+| **`compass_on_failure()` hook** | On op failure, Compass writes a post-mortem, attaches to run metadata, optionally posts to Slack. |
+| **`@compass_retry_advisor()` decorator** | On exception, Compass decides whether to retry (transient) or terminate (deterministic). |
+| **`compass_asset_check(...)`** | Natural-language asset checks — "is this materialization anomalous?" becomes a first-class Dagster check. |
+| **`compass_sensor(...)`** | Autonomous monitoring — sensor asks Compass each tick whether to launch a job. |
+| **`compass.generate_job_runbook(...)`** | Markdown runbook for a job, regenerated from latest run history. Persist as an asset, file, or Notion page. |
+| **`DailyInsightDigest` component** | One-YAML-block daily digest — asset + schedule that materialize Compass's answer as markdown. |
+| **`CompassClient`** | Dagster-free sync client. Same features, usable in scripts, FastAPI, notebooks, other orchestrators. |
 
 ## Install
 
 ```bash
 pip install dagster-compass-kit
-# optional: Slack posting from the failure hook and digest component
-pip install 'dagster-compass-kit[slack]'
-# optional: dagster-components YAML support
-pip install 'dagster-compass-kit[components]'
+pip install 'dagster-compass-kit[slack]'       # + Slack posting
+pip install 'dagster-compass-kit[components]'  # + dagster-components YAML support
 ```
 
-## Quick start — resource
+## Quick start — resource + structured
 
 ```python
 from dagster import asset, Definitions, EnvVar, MaterializeResult, MetadataValue
+from pydantic import BaseModel
 from dagster_compass_kit import CompassResource
 
+class PipelineHealth(BaseModel):
+    overall: str  # healthy | degraded | critical
+    top_issues: list[str]
+    trend: str
+
 @asset
-def weekly_digest(compass: CompassResource) -> MaterializeResult:
-    answer = compass.ask("Summarize this week's pipeline health.")
-    return MaterializeResult(metadata={"digest": MetadataValue.md(answer.text)})
+def health_snapshot(compass: CompassResource) -> MaterializeResult:
+    verdict = compass.ask_structured(
+        "Assess the overall pipeline health right now.",
+        PipelineHealth,
+    )
+    return MaterializeResult(metadata={
+        "overall": MetadataValue.text(verdict.overall),
+        "trend": MetadataValue.text(verdict.trend),
+        "top_issues": MetadataValue.json(verdict.top_issues),
+    })
 
 defs = Definitions(
-    assets=[weekly_digest],
+    assets=[health_snapshot],
     resources={
         "compass": CompassResource(
-            dagster_cloud_url=EnvVar("DAGSTER_CLOUD_URL"),   # https://<org>.dagster.cloud/<dep>/graphql
+            dagster_cloud_url=EnvVar("DAGSTER_CLOUD_URL"),
             api_token=EnvVar("DAGSTER_CLOUD_API_TOKEN"),
         ),
     },
 )
 ```
 
-`CompassResource.ask(...)` is blocking-synchronous. Use `.ask_async(...)` from
-inside an existing event loop. Multi-turn: keep the returned `chat_id` and
-pass it to the next `ask(..., chat_id=...)`.
+## Quick start — multi-turn conversation
 
-## Quick start — failure hook
+```python
+with compass.conversation() as chat:
+    verdict = chat.ask_structured("Assess pipeline health.", PipelineHealth)
+    if verdict.top_issues:
+        # Follow-up with full context from previous turn
+        drill = chat.ask(f"For '{verdict.top_issues[0]}', walk me through root cause and fix.")
+```
+
+## Quick start — auto post-mortem on failure
 
 ```python
 from dagster import job, op
@@ -70,12 +93,12 @@ def orders_pipeline():
     orders_etl()
 ```
 
-When any op fails, the hook calls Compass with the job name, run id, and
-failed step name, attaches the summary to the run as metadata, and — if a
-Slack resource is wired up — posts to the channel. Customize the prompt via
-`compass_on_failure(prompt="...")`.
+On op failure, Compass gets the job name, run id, and failing step; writes a
+summary grounded in recent history; attaches it as run metadata and posts to
+Slack. Silent-fails if Slack is down so a broken Slack never masks a real
+pipeline failure.
 
-## Quick start — retry advisor
+## Quick start — Compass-decided retry
 
 ```python
 from dagster import op
@@ -84,31 +107,57 @@ from dagster_compass_kit import compass_retry_advisor
 @op(required_resource_keys={"compass"})
 @compass_retry_advisor(max_attempts=3)
 def fetch_orders(context):
-    ...  # may raise ConnectionError, KeyError, etc.
+    ...  # may raise
 ```
 
-On exception, the decorator asks Compass to analyze the error in the context
-of recent run history for this deployment. If Compass says the error is
-transient (network blip, upstream 502, rate limit), the op `RetryRequested`s
-with Compass's suggested backoff. If it says deterministic (missing key,
-schema violation, auth failure), the op raises `Failure` with the reason and
-doesn't retry. Either way, the verdict is attached to the op's metadata for
-humans to audit.
+On exception, Compass classifies as transient / deterministic / data_quality /
+dependency / unknown and advises retry vs. terminate. Transient errors raise
+`RetryRequested` with Compass's suggested backoff; deterministic errors raise
+`Failure` with the reason. Fails closed — broken Compass re-raises original
+exception.
 
-Fails closed: if Compass is down, times out, or returns unparseable JSON,
-the original exception is re-raised unchanged so you never mask a real
-failure behind a broken AI.
-
-One-shot classification is also available on the resource directly:
+## Quick start — asset check
 
 ```python
-try:
-    do_work()
-except Exception as e:
-    analysis = compass.classify_exception(e, op_name="fetch_orders")
-    if analysis.should_retry:
-        ...
+from dagster_compass_kit import compass_asset_check
+
+orders_anomaly_check = compass_asset_check(
+    asset=orders_augmented,
+    prompt="Is the latest materialization of '{asset_key}' anomalous in row count or runtime?",
+)
 ```
+
+Renders in Dagster's UI alongside your other checks; fires alerts through
+existing alerting policies; fails open (warn-only) if Compass's response
+isn't parseable.
+
+## Quick start — autonomous sensor
+
+```python
+from dagster_compass_kit import compass_sensor
+
+health_watcher = compass_sensor(
+    name="compass_health_watcher",
+    job=remediation_job,
+    prompt="Is anything critical broken that needs remediation?",
+    minimum_interval_seconds=300,
+    should_trigger=lambda d: d.severity in ("medium", "high", "critical"),
+)
+```
+
+Sensor ticks on your schedule, asks Compass, launches the job when Compass
+says to. Runs are tagged with Compass's severity + reason for audit.
+
+## Quick start — runbook generator
+
+```python
+@asset
+def orders_runbook(compass: CompassResource) -> MaterializeResult:
+    md = compass.generate_job_runbook(job_name="orders_pipeline")
+    return MaterializeResult(metadata={"runbook": MetadataValue.md(md)})
+```
+
+Schedule daily/weekly and your runbooks stay current as the pipeline evolves.
 
 ## Quick start — component
 
@@ -118,118 +167,86 @@ type: dagster_compass_kit.DailyInsightDigest
 attributes:
   asset_key: analytics/daily_compass_digest
   cron_schedule: "0 9 * * *"
-  prompt: |
-    Summarize yesterday's pipeline activity. Call out failures, slowdowns,
-    anything unusual. Format as markdown.
-  slack_channel: "#data-standup"    # optional
+  prompt: Summarize yesterday's pipeline activity as markdown.
+  slack_channel: "#data-standup"
   resource_key: compass
 ```
 
-The component generates the asset, a job that materializes it, and a
-schedule that fires the job. Your `Definitions` still needs to expose the
-`compass` (and optional `slack`) resource.
-
 ## What Compass can and can't answer
 
-Compass is an agentic SQL-over-operational-data LLM. Meaningfully:
+Compass is an agentic SQL-over-operational-data LLM. Empirically:
 
 - ✅ Runtime trends, retry patterns, slowest/busiest jobs, failure root causes,
-  stale assets, materialization history.
+  stale assets, asset-check failures, materialization history.
 - ❌ Billing / credits / seat counts — those live in the billing system, not
-  Compass's queryable surface. Don't ask about them; you'll get hallucinated
-  or errored answers.
-- 🤔 Live in-flight state is lagged — the operational tables aren't real-time.
-  For "what's running right now?" use Dagster's regular GraphQL.
+  Compass's queryable surface. Don't ask; Compass will hallucinate or error.
+- 🤔 Live in-flight state is slightly lagged — the operational tables aren't
+  strictly real-time. For "what's running right now?" use Dagster's regular
+  GraphQL.
+
+## Dagster-free usage
+
+Most features work from any Python context via `CompassClient`:
+
+```python
+from dagster_compass_kit import CompassClient
+from pydantic import BaseModel
+
+client = CompassClient(
+    dagster_cloud_url="https://my-org.dagster.cloud/prod/graphql",
+    api_token="user:...",
+)
+
+class X(BaseModel):
+    is_broken: bool
+    reason: str
+
+x = client.ask_structured("Is our ETL broken right now?", X)
+
+# Multi-turn
+with client.conversation() as chat:
+    chat.ask("...")
+    chat.ask("...")
+```
 
 ## Configuration reference
 
-### `CompassResource`
+See module docstrings for full parameter detail. Highlights:
 
-| Field | Required | Notes |
-| --- | --- | --- |
-| `dagster_cloud_url` | yes | Full GraphQL URL. ws:// is derived. |
-| `api_token` | yes | Dagster+ user or service-account token. |
-| `timeout_seconds` | no (default 120s) | Hard cap per call. |
-
-### `compass_on_failure(...)`
-
-| Arg | Default | Notes |
-| --- | --- | --- |
-| `prompt` | auto Dagster-aware | Supports `{job_name}`, `{run_id}`, `{step_key}`. |
-| `slack_channel` | `None` | If set, requires a `SlackResource`. |
-| `resource_key` | `"compass"` | Resource key on your Definitions. |
-| `metadata_key` | `"compass_post_mortem"` | Key for run-metadata attachment. |
-
-### `compass_retry_advisor(...)`
-
-| Arg | Default | Notes |
-| --- | --- | --- |
-| `resource_key` | `"compass"` | Resource key holding the `CompassResource`. |
-| `max_attempts` | `3` | Hard cap on retries regardless of Compass's answer — prevents a hallucinating LLM from looping forever. |
-| `on_parse_failure` | `"raise"` | `raise` / `retry_once` / `fail`. What to do if Compass's response isn't parseable JSON. Default re-raises the original exception. |
-| `wait_cap_seconds` | `120` | Ignore wildly large `retry_after_seconds` values. |
-
-Compass is asked to return JSON with the shape:
-
-```json
-{
-  "should_retry": true,
-  "retry_after_seconds": 30,
-  "category": "transient" | "deterministic" | "data_quality" | "dependency" | "unknown",
-  "confidence": "low" | "medium" | "high",
-  "reason": "<short explanation>",
-  "similar_failures_recently": 3
-}
-```
-
-The verdict is attached to op metadata under `compass_retry_verdict` for
-audit, and logged via the op's logger.
-
-### `DailyInsightDigest` attributes
-
-| Field | Default | Notes |
-| --- | --- | --- |
-| `asset_key` | required | Slash-separated key, e.g. `analytics/digest`. |
-| `prompt` | required | Asked verbatim; supports markdown response formatting. |
-| `cron_schedule` | `"0 9 * * *"` | Standard cron. |
-| `slack_channel` | `None` | Optional Slack post on each materialization. |
-| `resource_key` | `"compass"` |  |
-| `group_name` | `"compass"` |  |
+- `CompassResource(dagster_cloud_url=, api_token=, timeout_seconds=120)`
+- `compass_on_failure(prompt=, slack_channel=, resource_key=, metadata_key=)`
+- `compass_retry_advisor(max_attempts=3, on_parse_failure='raise', wait_cap_seconds=120)`
+- `compass_asset_check(asset=, prompt=, severity_mapper=, blocking=False)`
+- `compass_sensor(job=, prompt=, minimum_interval_seconds=300, should_trigger=, default_status=STOPPED)`
 
 ## How it works under the hood
 
-Compass is exposed as a GraphQL subscription at
-`wss://<org>.dagster.cloud/<deployment>/graphql` using the legacy
-`subscriptions-transport-ws` protocol. This package speaks that protocol
-directly (no `gql` dependency), handles Bearer auth via both the HTTP
-upgrade headers and the `connection_init` payload, and assembles the
-streamed `DeltaTextBlock` / tool-call / completion chunks into a tidy
-`CompassResponse`.
-
-Feature gates (`DAGSTER_PLUS_COMPASS_ENABLED` / `ENABLE_AI_SUMMARIES`) are
-**not** checked client-side here — if the gate is off, Compass errors and
-you'll see that in `CompassResponse.error`. Check `identity.featureGates`
-via normal Dagster+ GraphQL if you want to gate pipeline logic on it.
+- Direct WebSocket implementation of the legacy `subscriptions-transport-ws`
+  protocol (which Dagster Cloud speaks) — no `gql` dependency.
+- Bearer auth sent in both the HTTP upgrade headers and the `connection_init`
+  payload for max compatibility.
+- Streamed chunks (`DeltaTextBlock`, tool blocks, completion) assembled into
+  a single `CompassResponse`. Direct chunk access via `stream_ai_chat(...)`
+  for real-time consumers.
+- Structured responses use a JSON-schema instruction footer plus a forgiving
+  parser that handles ```` ```json ```` fences and prose-wrapped JSON.
 
 ## Security
 
-- The API token is a secret. Always wire it through `EnvVar` or a secrets
-  manager; never commit it.
-- Compass responses are markdown. If you render them somewhere other than
-  Dagster's UI, apply an allow-list for URL schemes (Compass responses don't
-  currently contain links, but that could change).
-- This package does not log the API token or frame contents.
+- API tokens are secrets — wire through `EnvVar` or a secrets manager.
+- Compass responses are markdown. If you render them outside Dagster's UI,
+  allow-list URL schemes (today's responses don't contain links but that could
+  change).
+- This package never logs the token or frame contents.
 
 ## Limitations
 
-- Synchronous `ask()` uses `asyncio.run()` internally; don't call it inside
-  an already-running event loop (use `ask_async` there).
-- The legacy WebSocket subprotocol is deprecated upstream but is what
-  Dagster Cloud currently speaks. If Dagster migrates to `graphql-ws`, this
-  package will need a transport update.
-- One-shot subscriptions — no streaming to the caller. For real-time token
-  display, subscribe to the chunk stream directly via
-  `stream_ai_chat(...)` exported from `dagster_compass_kit.client`.
+- Synchronous `ask()` uses `asyncio.run()` internally; use `ask_async` inside
+  an existing event loop.
+- Per-call latency is 20–40 seconds. Don't use on fast, high-frequency paths.
+- Legacy WebSocket subprotocol is deprecated upstream but is what Dagster
+  Cloud currently speaks. If Dagster migrates to `graphql-ws`, this package
+  will need a transport update.
 
 ## License
 

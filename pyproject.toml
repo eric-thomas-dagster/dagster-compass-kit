@@ -1,6 +1,6 @@
 [project]
 name = "dagster-compass-kit"
-version = "0.1.0"
+version = "0.2.0"
 description = "Community-supported Dagster integration for Dagster+ Compass: resource, hooks, and components for using Compass inside pipelines."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -17,6 +17,7 @@ classifiers = [
 dependencies = [
     "dagster>=1.9",
     "websockets>=12",
+    "pydantic>=2",
 ]
 
 [project.optional-dependencies]
