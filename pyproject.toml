@@ -1,0 +1,43 @@
+[project]
+name = "dagster-compass-kit"
+version = "0.1.0"
+description = "Community-supported Dagster integration for Dagster+ Compass: resource, hooks, and components for using Compass inside pipelines."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Community" }]
+keywords = ["dagster", "compass", "llm", "ai", "pipelines"]
+classifiers = [
+    "Framework :: Dagster",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+]
+dependencies = [
+    "dagster>=1.9",
+    "websockets>=12",
+]
+
+[project.optional-dependencies]
+slack = ["slack_sdk>=3"]
+components = ["dagster-components>=0.25"]
+dev = ["pytest>=7", "ruff>=0.6", "mypy>=1"]
+
+[project.urls]
+Homepage = "https://github.com/eric-thomas-dagster/dagster-compass-kit"
+Repository = "https://github.com/eric-thomas-dagster/dagster-compass-kit"
+
+[project.entry-points."dagster_dg_cli.registry_modules"]
+dagster_compass_kit = "dagster_compass_kit.components"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dagster_compass_kit"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
