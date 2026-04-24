@@ -209,6 +209,24 @@ with client.conversation() as chat:
     chat.ask("...")
 ```
 
+## Assumptions this kit makes
+
+Compass is a hosted product we don't control. [ASSUMPTIONS.md](ASSUMPTIONS.md)
+documents every empirical assumption we're relying on so you can sanity-check
+them against your own deployment. Highlights:
+
+- **Data freshness is now live** (was hourly in older builds of Compass).
+- **Compass can classify exceptions without historical context** — the
+  retry-advisor prompt explicitly tells Compass to fall back on general
+  Python/library knowledge if no history exists, so brand-new jobs still work.
+- **This kit fails closed** — if Compass errors or times out, the original
+  exception is re-raised or the asset check fails open (WARN-only). An AI
+  outage must never mask a real pipeline failure.
+- **Opt-in static heuristic fallback** — pass `fallback_to_heuristic=True` to
+  `@compass_retry_advisor` and we'll use a conservative exception-type table
+  (`ConnectionError`/`TimeoutError` → retry; `KeyError`/`TypeError` → don't)
+  if Compass isn't reachable. See `heuristic_classify()` in `retry.py`.
+
 ## Configuration reference
 
 See module docstrings for full parameter detail. Highlights:

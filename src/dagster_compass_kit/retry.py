@@ -49,8 +49,22 @@ Exception message: {exc_message}
 Traceback (most recent call last, abbreviated):
 {traceback_str}
 
-Use your access to recent run history for this deployment to check whether \
-similar failures have happened on this job/op before, and how they resolved.
+If recent run history for this job/op is available in your operational data,
+use it to check whether similar failures have happened before and how they
+resolved. BUT if this is a brand-new job, a first-time exception, or you
+have no historical context at all, still classify based on your general
+knowledge of the exception type, its message, and the traceback — Python
+semantics and common library failure modes are enough to make a confident
+call for most errors. Don't refuse to classify just because you've never
+seen this pattern before.
+
+Rules of thumb for when history is unavailable:
+- ConnectionError, TimeoutError, OSError, OperationalError (SQL drivers),
+  rate-limit / throttling errors → transient
+- KeyError, AttributeError, TypeError, ValueError, NameError,
+  AssertionError, ImportError, FileNotFoundError → deterministic
+- Schema / data-contract violations → data_quality
+- Upstream-service 5xx or unauthorized → dependency
 
 Respond ONLY with a single JSON object, no prose, no markdown fences. Schema:
 
@@ -60,9 +74,148 @@ Respond ONLY with a single JSON object, no prose, no markdown fences. Schema:
   "category": "transient" | "deterministic" | "data_quality" | "dependency" | "unknown",
   "confidence": "low" | "medium" | "high",
   "reason": "<one sentence>",
-  "similar_failures_recently": <integer>
+  "similar_failures_recently": <integer — 0 if no history available>
 }}
 """
+
+
+# ── Static heuristic fallback ────────────────────────────────────────────────
+# Used when Compass is unavailable / errors / returns unparseable output AND
+# the caller opted in with ``fallback_to_heuristic=True``. Deliberately
+# conservative — we only classify exceptions whose semantics are very well
+# known. Anything else stays "unknown" which forces a re-raise of the
+# original exception.
+
+_TRANSIENT_TYPES: set[str] = {
+    "ConnectionError",
+    "ConnectionResetError",
+    "ConnectionAbortedError",
+    "ConnectionRefusedError",
+    "TimeoutError",
+    "ReadTimeout",
+    "ConnectTimeout",
+    "ConnectionTimeoutError",
+    # SQL / warehouse clients
+    "OperationalError",
+    "InterfaceError",
+    "DatabaseError",  # broad; could be deterministic but usually transient in practice
+    # HTTP clients — name overlap across libs (requests, httpx, aiohttp)
+    "RemoteDisconnected",
+    "ProtocolError",
+    "ChunkedEncodingError",
+    # Rate-limiting flavors
+    "ThrottlingException",
+    "RateLimitError",
+    "TooManyRequests",
+    "ServiceUnavailable",
+    # Cloud SDK transient flavors
+    "DeadlineExceeded",
+    "ResourceExhausted",
+    "Unavailable",
+    "SnowflakeInternalError",
+    # OS-level flakes
+    "OSError",
+    "IOError",
+    "BlockingIOError",
+}
+
+_DETERMINISTIC_TYPES: set[str] = {
+    "KeyError",
+    "AttributeError",
+    "TypeError",
+    "NameError",
+    "ValueError",
+    "ImportError",
+    "ModuleNotFoundError",
+    "AssertionError",
+    "SyntaxError",
+    "IndentationError",
+    "FileNotFoundError",
+    "IsADirectoryError",
+    "NotADirectoryError",
+    "NotImplementedError",
+    "ZeroDivisionError",
+    "OverflowError",
+    "RecursionError",
+    "StopIteration",
+    "StopAsyncIteration",
+    "LookupError",
+    "IndexError",
+    "UnboundLocalError",
+}
+
+_DATA_QUALITY_TYPES: set[str] = {
+    # Pydantic / dataclass-style validation
+    "ValidationError",
+    "SchemaError",
+    "SchemaValidationError",
+    "DataError",
+    # Great Expectations / pandera / other data-contract libs
+    "ExpectationError",
+    "AnomalyDetected",
+    # Pandas "bad data" types are typically subclasses of ValueError already
+}
+
+_DEPENDENCY_TYPES: set[str] = {
+    # Auth / upstream-service failures
+    "PermissionError",
+    "Forbidden",
+    "Unauthorized",
+    "HTTPError",  # often 4xx/5xx upstream
+    "AuthenticationError",
+    "AuthorizationError",
+    "ClientError",  # boto3 umbrella — many of these are dependency issues
+}
+
+
+def heuristic_classify(exc: BaseException) -> "ExceptionAnalysis | None":
+    """Return a conservative static verdict based on exception type alone.
+
+    Returns ``None`` if the type isn't recognized — caller should treat that
+    as "unknown, re-raise." Never consults Compass.
+    """
+    name = type(exc).__name__
+    if name in _TRANSIENT_TYPES:
+        return ExceptionAnalysis(
+            should_retry=True,
+            retry_after_seconds=10,
+            category="transient",
+            confidence="medium",
+            reason=f"{name} is a known-transient exception type (heuristic, no Compass consulted)",
+            similar_failures_recently=0,
+            raw_response="(heuristic)",
+        )
+    if name in _DETERMINISTIC_TYPES:
+        return ExceptionAnalysis(
+            should_retry=False,
+            retry_after_seconds=0,
+            category="deterministic",
+            confidence="high",
+            reason=f"{name} is a known-deterministic exception type (heuristic, no Compass consulted)",
+            similar_failures_recently=0,
+            raw_response="(heuristic)",
+        )
+    if name in _DATA_QUALITY_TYPES:
+        return ExceptionAnalysis(
+            should_retry=False,
+            retry_after_seconds=0,
+            category="data_quality",
+            confidence="medium",
+            reason=f"{name} is a known-data-quality exception type (heuristic, no Compass consulted)",
+            similar_failures_recently=0,
+            raw_response="(heuristic)",
+        )
+    if name in _DEPENDENCY_TYPES:
+        return ExceptionAnalysis(
+            should_retry=True,
+            retry_after_seconds=15,
+            category="dependency",
+            confidence="low",
+            reason=f"{name} is a known-dependency exception type (heuristic, no Compass consulted)",
+            similar_failures_recently=0,
+            raw_response="(heuristic)",
+        )
+    return None
 
 
 @dataclass
@@ -174,6 +327,7 @@ def compass_retry_advisor(
     max_attempts: int = 3,
     on_parse_failure: Literal["raise", "retry_once", "fail"] = "raise",
     wait_cap_seconds: int = 120,
+    fallback_to_heuristic: bool = False,
 ) -> Callable:
     """Decorator: on exception, ask Compass whether to retry.
 
@@ -199,6 +353,14 @@ def compass_retry_advisor(
             op terminal.
         wait_cap_seconds: cap for ``retry_after_seconds`` — ignores any
             wildly large value Compass returns.
+        fallback_to_heuristic: if True and Compass is unavailable or
+            returns unparseable output, fall back to
+            :func:`heuristic_classify` — a static exception-type table
+            covering well-known transient/deterministic Python errors.
+            If the heuristic also doesn't recognize the exception type,
+            behavior falls through to ``on_parse_failure``. Defaults to
+            False (Compass-only) for predictable behavior; enable when
+            you'd rather have *some* decision than none.
     """
 
     def decorator(fn: Callable) -> Callable:
@@ -210,95 +372,131 @@ def compass_retry_advisor(
                 # Already-classified — pass straight through
                 raise
             except Exception as exc:  # noqa: BLE001 - we explicitly want broad
+                attempt = context.retry_number + 1
+
+                def _try_heuristic(reason_prefix: str) -> Optional[ExceptionAnalysis]:
+                    if not fallback_to_heuristic:
+                        return None
+                    h = heuristic_classify(exc)
+                    if h is not None:
+                        context.log.info(
+                            f"compass_retry_advisor: {reason_prefix}; "
+                            f"heuristic fallback decides {h.category}/retry={h.should_retry}"
+                        )
+                    return h
+
+                # 1. Resource missing?
                 try:
                     compass = getattr(context.resources, resource_key)
                 except Exception as e:  # noqa: BLE001
                     context.log.warning(
-                        f"compass_retry_advisor: resource '{resource_key}' missing ({e!r}); "
-                        "re-raising original exception"
+                        f"compass_retry_advisor: resource '{resource_key}' missing ({e!r})"
                     )
+                    h = _try_heuristic("resource unavailable")
+                    if h is not None:
+                        return _apply_decision(context, exc, h, attempt, max_attempts, wait_cap_seconds)
                     raise exc
-
-                attempt = context.retry_number + 1
-                prompt = _build_prompt(
-                    exc,
-                    job_name=context.job_name,
-                    op_name=context.op.name,
-                    run_id=context.run_id,
-                    attempt=attempt,
-                )
 
                 context.log.info(
                     f"compass_retry_advisor: classifying {type(exc).__name__} via Compass "
                     f"(attempt {attempt}/{max_attempts}, fingerprint={exception_fingerprint(exc)})"
                 )
 
+                # 2. Compass call itself fails (timeout, WS error)
                 try:
+                    prompt = _build_prompt(
+                        exc,
+                        job_name=context.job_name,
+                        op_name=context.op.name,
+                        run_id=context.run_id,
+                        attempt=attempt,
+                    )
                     response = compass.ask(prompt)
                 except Exception as e:  # noqa: BLE001
-                    context.log.warning(
-                        f"compass_retry_advisor: Compass call failed ({e!r}); "
-                        "re-raising original exception"
-                    )
+                    context.log.warning(f"compass_retry_advisor: Compass call failed ({e!r})")
+                    h = _try_heuristic("Compass call failed")
+                    if h is not None:
+                        return _apply_decision(context, exc, h, attempt, max_attempts, wait_cap_seconds)
                     raise exc
 
                 analysis = parse_analysis(response.text or "")
+                parse_failed = analysis.category == "unknown" and not analysis.raw_response
 
-                # Always log + persist the analysis for humans to audit
-                context.log.info(
-                    f"Compass verdict: retry={analysis.should_retry} "
-                    f"category={analysis.category} confidence={analysis.confidence} "
-                    f"reason={analysis.reason!r}"
-                )
-                context.add_output_metadata(  # type: ignore[attr-defined]
-                    {
-                        "compass_retry_verdict": {
-                            "should_retry": analysis.should_retry,
-                            "category": analysis.category,
-                            "confidence": analysis.confidence,
-                            "reason": analysis.reason,
-                            "similar_failures_recently": analysis.similar_failures_recently,
-                        },
-                    },
-                )
-
-                # Parse-failure handling — decide before consulting the verdict
-                if analysis.category == "unknown" and not analysis.raw_response:
+                # 3. Parse failure — consult heuristic first, then fall through to on_parse_failure
+                if parse_failed:
+                    h = _try_heuristic("Compass response unparseable")
+                    if h is not None:
+                        return _apply_decision(context, exc, h, attempt, max_attempts, wait_cap_seconds)
                     if on_parse_failure == "raise":
                         raise exc
                     if on_parse_failure == "fail":
                         raise Failure(
                             description=f"Unclassifiable: {type(exc).__name__}: {exc}"
-                        )
+                        ) from exc
                     # retry_once
                     if attempt < max_attempts:
                         raise RetryRequested(max_retries=1, seconds_to_wait=5) from exc
-                    raise Failure(description=f"Exhausted retries for unclassifiable {type(exc).__name__}")
-
-                if not analysis.should_retry:
                     raise Failure(
-                        description=f"[{analysis.category}] {analysis.reason}",
-                        metadata={
-                            "original_exception": f"{type(exc).__name__}: {exc}",
-                            "compass_reason": analysis.reason,
-                            "confidence": analysis.confidence,
-                        },
+                        description=f"Exhausted retries for unclassifiable {type(exc).__name__}"
                     ) from exc
 
-                if attempt >= max_attempts:
-                    raise Failure(
-                        description=(
-                            f"Retry cap ({max_attempts}) reached; Compass still said "
-                            f"retry. Last reason: {analysis.reason}"
-                        ),
-                    ) from exc
-
-                wait = max(0, min(wait_cap_seconds, analysis.retry_after_seconds))
-                raise RetryRequested(
-                    max_retries=max_attempts - attempt,
-                    seconds_to_wait=wait,
-                ) from exc
+                # 4. Compass returned a valid verdict — apply it
+                return _apply_decision(context, exc, analysis, attempt, max_attempts, wait_cap_seconds)
 
         return wrapper
 
     return decorator
+
+
+def _apply_decision(
+    context: OpExecutionContext,
+    exc: BaseException,
+    analysis: ExceptionAnalysis,
+    attempt: int,
+    max_attempts: int,
+    wait_cap_seconds: int,
+):
+    """Take Compass's (or the heuristic's) verdict and either retry, fail, or raise.
+
+    Always attaches the verdict as op metadata under ``compass_retry_verdict``
+    before raising so humans can audit every AI decision after the fact.
+    """
+    context.log.info(
+        f"Retry verdict: retry={analysis.should_retry} category={analysis.category} "
+        f"confidence={analysis.confidence} reason={analysis.reason!r}"
+    )
+    context.add_output_metadata(  # type: ignore[attr-defined]
+        {
+            "compass_retry_verdict": {
+                "source": (
+                    "heuristic" if analysis.raw_response == "(heuristic)" else "compass"
+                ),
+                "should_retry": analysis.should_retry,
+                "category": analysis.category,
+                "confidence": analysis.confidence,
+                "reason": analysis.reason,
+                "similar_failures_recently": analysis.similar_failures_recently,
+            },
+        },
+    )
+
+    if not analysis.should_retry:
+        raise Failure(
+            description=f"[{analysis.category}] {analysis.reason}",
+            metadata={
+                "original_exception": f"{type(exc).__name__}: {exc}",
+                "verdict_reason": analysis.reason,
+                "confidence": analysis.confidence,
+            },
+        ) from exc
+
+    if attempt >= max_attempts:
+        raise Failure(
+            description=(
+                f"Retry cap ({max_attempts}) reached; classifier still said retry. "
+                f"Last reason: {analysis.reason}"
+            ),
+        ) from exc
+
+    wait = max(0, min(wait_cap_seconds, analysis.retry_after_seconds))
+    raise RetryRequested(max_retries=max_attempts - attempt, seconds_to_wait=wait) from exc

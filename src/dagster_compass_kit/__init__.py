@@ -20,6 +20,7 @@ from .retry import (
     ExceptionAnalysis,
     compass_retry_advisor,
     exception_fingerprint,
+    heuristic_classify,
     parse_analysis,
 )
 from .runbook import (
@@ -59,6 +60,7 @@ __all__ = [
     # Retry-advisor helpers
     "ExceptionAnalysis",
     "exception_fingerprint",
+    "heuristic_classify",
     "parse_analysis",
     # Runbook generation
     "generate_job_runbook",

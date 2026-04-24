@@ -1,0 +1,177 @@
+# Assumptions this kit makes about Dagster+ Compass
+
+Dagster+ Compass is a hosted product we don't control, so this kit rests on
+a handful of empirical observations and some educated guesses. This doc lists
+them explicitly so anyone using the kit can sanity-check them against their
+own deployment, and so behavior changes in Compass can be spotted quickly.
+
+> **If any of these assumptions breaks for your deployment, please file an issue.**
+
+## Core assumptions
+
+### 1. The WebSocket subscription surface is stable
+
+We assume these subscriptions exist and accept the documented arguments:
+
+- `aiChat(chatId: Int!, payload: String!)`
+- `aiSummaryForAssetMaterialization(runId: ID!, assetKey: AssetKeyInput!)`
+
+The response union type (`ChatResponseChunkOrError`) includes at least:
+`StartChatStream`, `StartTextBlock`, `DeltaTextBlock`, `CompleteTextBlock`,
+`StartToolBlock`, `DeltaToolInputBlock`, `CompleteToolBlock`,
+`CompleteChatStream`, `AISummaryError`, `PythonError`.
+
+Observed on Dagster Cloud builds up to `98f80978` (April 2026). If Dagster
+changes the subscription names or chunk union, this kit will break fast and
+loud (server will close with a schema error).
+
+### 2. Authentication
+
+We assume a Dagster+ API token sent as `Authorization: Bearer <token>` in the
+WebSocket HTTP upgrade headers **and** in the `connection_init` payload is
+accepted. Either path alone has worked in practice; sending both is
+belt-and-suspenders.
+
+Cookie auth (what the web UI uses) is NOT supported — this is for API-token
+auth only, which is the path Dagster+ exposes to programmatic consumers.
+
+### 3. Wire protocol
+
+`subscriptions-transport-ws` (the legacy protocol — frame types
+`connection_init`, `start`, `data`, `complete`, not `subscribe`/`next`).
+Dagster Cloud emits the legacy format as of April 2026.
+
+If Dagster migrates to `graphql-ws`, this kit will need a transport update
+(single file: `src/dagster_compass_kit/client.py`).
+
+## Data-access assumptions
+
+### 4. Compass has live access to Dagster+ operational data
+
+**Earlier guidance suggested Compass data was refreshed hourly.** Based on
+recent conversation with Dagster staff, Compass now queries **live**
+operational data. This kit does not lean on the hourly-refresh assumption.
+
+What this means for consumers:
+
+- ✅ Questions like "what runs are failing right now?" / "what materialized
+  in the last 10 minutes?" should work with sub-minute freshness.
+- ✅ Auto-postmortem (`compass_on_failure`) and retry-advisor calls fired
+  seconds after a failure can still find the run in Compass's context.
+- 🤔 If you observe stale answers (Compass claims "no failures" when there
+  obviously are), file a ticket with Dagster support — and reconsider
+  whether this assumption still holds.
+
+### 5. Compass can reason about exceptions even without historical context
+
+This is load-bearing for the retry-advisor to work on brand-new jobs /
+first-time-seen exception types. **Our prompt explicitly tells Compass:
+"If you have no history for this exception, classify based on your
+knowledge of the exception type, message, and traceback alone."**
+
+LLMs grounded in Python + common library semantics can reliably classify:
+
+- `ConnectionError` / `TimeoutError` → transient
+- `KeyError` / `AttributeError` / `TypeError` → deterministic
+
+...without needing to have seen a matching failure before. The
+`compass_retry_advisor` decorator trusts this.
+
+If Compass refuses to classify without history, you can opt into a
+deterministic static heuristic as a fallback:
+
+```python
+@compass_retry_advisor(max_attempts=3, fallback_to_heuristic=True)
+def fetch_orders(context): ...
+```
+
+See `heuristic_classify()` in `retry.py` for the fallback table.
+
+### 6. Tool surface observed
+
+Compass has used at least these tools during our testing:
+
+- `TOOL_TYPE_SEARCH_DATASETS`
+- `TOOL_TYPE_RUN_SQL_QUERY` — actually runs SQL against operational tables
+  like `dagster_plus_operational_data_org_<N>.dagster_plus_runs`
+- `TOOL_TYPE_RENDER_DATA_VISUALIZATION`
+
+This kit doesn't gate on specific tool types — it just surfaces them via
+`CompassResponse.tool_calls` for audit / metadata attachment. New tool
+types Compass adds later should flow through transparently.
+
+## Scope assumptions
+
+### 7. Dagster+ Compass only
+
+This kit does NOT talk to standalone [compass.dagster.io](https://compass.dagster.io/)
+(the hosted product where customers connect arbitrary data sources). The
+URL, auth, and tool surface there are different. This kit hits
+`wss://<org>.dagster.cloud/<deployment>/graphql` — the Compass embedded
+inside Dagster+ — and ONLY that.
+
+### 8. Compass does not know about billing / credits
+
+Empirically confirmed: Compass cannot answer questions about Dagster+
+credits, seat counts, or billing. Those live in a different system, not
+queryable by Compass. This kit's documentation and example prompts steer
+away from billing questions. If you ask anyway, expect hallucinated or
+errored responses — not a kit bug.
+
+### 9. Latency per call is 20–40 seconds
+
+Compass streams tokens for ~30 seconds on a typical question that involves
+tool use. This kit's default `timeout_seconds=120` gives generous headroom.
+
+Consumers should NOT use this kit on hot paths — a retry-advisor wrapped
+around a 10ms op adds a ~30s penalty per failure. Reserve for high-stakes,
+low-frequency paths (scheduled jobs, critical asset checks, incident
+triage).
+
+## Failure behavior
+
+### 10. Fail closed, not open
+
+When Compass errors, times out, or returns unparseable JSON, this kit's
+default is to **re-raise the original exception unchanged** or **fail open
+with a WARN** on asset checks. Rationale: an AI outage must never mask a
+real data-quality or pipeline failure.
+
+Specific defaults:
+
+| Surface | On Compass failure |
+| --- | --- |
+| `CompassResource.ask()` | Returns `CompassResponse` with `.error` set |
+| `CompassResource.ask_structured()` | Raises `CompassSchemaError` |
+| `compass_on_failure` hook | Logs warning, returns — original failure stands |
+| `@compass_retry_advisor` (default) | Re-raises original exception |
+| `@compass_retry_advisor(fallback_to_heuristic=True)` | Uses static exception-type table |
+| `compass_asset_check` | WARN-severity pass-through (doesn't block downstream) |
+| `compass_sensor` | `SkipReason` (no run launched) |
+
+## Things we deliberately don't assume
+
+- **That Compass is deterministic.** It's an LLM. Same prompt can give
+  slightly different answers. Use `exception_fingerprint()` if you need
+  cache-stable behavior within a backfill.
+- **That responses are JSON-only.** They arrive as markdown, sometimes
+  with code fences, sometimes with prose. Our parser is forgiving.
+- **That `chat_id` is persistent across deployments.** It's a per-tenant
+  server-side id; don't try to resume a conversation across days.
+- **That feature flags stay on.** `DAGSTER_PLUS_COMPASS_ENABLED` can be
+  flipped off for your tenant. This kit does NOT check that flag — if
+  Compass is gated off, you'll see server errors on every call. Check
+  the flag yourself via `identity.featureGates` if you want to gate
+  pipeline logic on it.
+
+## Verification
+
+To empirically validate assumptions for your deployment, run:
+
+```bash
+python -m dagster_compass_kit.doctor \
+    --url https://my-org.dagster.cloud/prod/graphql \
+    --token "$DAGSTER_CLOUD_API_TOKEN"
+```
+
+*(Note: `doctor` command is TODO — contributions welcome.)*
