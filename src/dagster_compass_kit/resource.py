@@ -82,6 +82,38 @@ class CompassResource(ConfigurableResource):
 
     _client: CompassClient = PrivateAttr()
 
+    @classmethod
+    def from_env(
+        cls,
+        url_var: str = "DAGSTER_CLOUD_URL",
+        token_var: str = "DAGSTER_CLOUD_API_TOKEN",
+        **kwargs,
+    ) -> "CompassResource":
+        """Build a CompassResource from env vars, tolerating missing ones.
+
+        Dagster's built-in ``EnvVar(...)`` raises at config-resolution time
+        if the variable is unset, which blows up code-location loading in
+        dev/CI environments. This classmethod uses ``os.getenv`` with empty
+        string defaults instead — the resource loads, and
+        :class:`CompassNotConfiguredError` fires at call time if anything
+        actually tries to reach Compass with empty creds.
+
+        Identical runtime behavior on Dagster+ deployments: secrets
+        configured on the deployment are injected as real env vars, so
+        ``os.getenv`` resolves them just fine.
+
+        Example::
+
+            resources={"compass": CompassResource.from_env()}
+        """
+        import os
+
+        return cls(
+            dagster_cloud_url=os.getenv(url_var, ""),
+            api_token=os.getenv(token_var, ""),
+            **kwargs,
+        )
+
     def _ensure_configured(self) -> None:
         """Raise CompassNotConfiguredError if URL or token is unset."""
         missing: list[str] = []

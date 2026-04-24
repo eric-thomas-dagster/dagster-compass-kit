@@ -64,6 +64,22 @@ def test_compass_resource_raises_at_call_time_if_unconfigured():
         r.ask("hello")
 
 
+def test_compass_resource_from_env_tolerates_missing_vars(monkeypatch):
+    monkeypatch.delenv("DAGSTER_CLOUD_URL", raising=False)
+    monkeypatch.delenv("DAGSTER_CLOUD_API_TOKEN", raising=False)
+    r = CompassResource.from_env()
+    assert r.dagster_cloud_url == ""
+    assert r.api_token == ""
+
+
+def test_compass_resource_from_env_reads_vars_when_set(monkeypatch):
+    monkeypatch.setenv("DAGSTER_CLOUD_URL", "https://x/graphql")
+    monkeypatch.setenv("DAGSTER_CLOUD_API_TOKEN", "tok")
+    r = CompassResource.from_env()
+    assert r.dagster_cloud_url == "https://x/graphql"
+    assert r.api_token == "tok"
+
+
 def test_compass_resource_error_names_missing_env_vars():
     """The error message should tell the user exactly what to set."""
     r = CompassResource(dagster_cloud_url="https://x/graphql")  # token still empty
