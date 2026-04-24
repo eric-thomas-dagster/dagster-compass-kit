@@ -1,0 +1,6 @@
+locations:
+  - location_name: compass_demo
+    code_source:
+      package_name: compass_demo
+    build:
+      directory: .

@@ -19,6 +19,10 @@ aware, catalog-backed artifact.
 A personal project by [Eric Thomas](https://github.com/eric-thomas-dagster). Not
 an official Dagster Labs product.
 
+A minimal deployable demo lives at [`demo/`](./demo) — four assets in a
+cascade-producing graph + the classifier sensor wired up. Good starting
+point for trying the kit against a real tenant.
+
 ## What you get
 
 | Piece | Use it for |
