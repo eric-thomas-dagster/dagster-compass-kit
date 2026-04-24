@@ -33,7 +33,7 @@ from .models import (
     MonitoringDecision,
     RunbookSections,
 )
-from .resource import CompassResource
+from .resource import CompassNotConfiguredError, CompassResource
 from .retry import (
     ExceptionAnalysis,
     compass_retry_advisor,
@@ -57,6 +57,7 @@ from .structured import (
 __all__ = [
     # Core surfaces
     "CompassResource",
+    "CompassNotConfiguredError",
     "CompassClient",
     "CompassConversation",
     "CompassResponse",
@@ -99,4 +100,4 @@ __all__ = [
     "stream_ai_summary_for_asset",
 ]
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"

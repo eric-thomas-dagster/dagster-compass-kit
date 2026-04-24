@@ -20,6 +20,20 @@ from .compass_client import CompassClient, CompassConversation
 T = TypeVar("T", bound=BaseModel)
 
 
+class CompassNotConfiguredError(RuntimeError):
+    """Raised when CompassResource is used without URL / API token set.
+
+    The resource deliberately allows empty defaults so Dagster code
+    locations load even when ``DAGSTER_CLOUD_URL`` or
+    ``DAGSTER_CLOUD_API_TOKEN`` aren't set yet — this is important for
+    local dev, CI, and early demo environments. This error only fires
+    at call-time, when something actually tries to reach Compass.
+
+    Kit surfaces (hooks, sensors, asset checks) all catch this and
+    degrade to a clean warning + skip rather than exploding the run.
+    """
+
+
 class CompassResource(ConfigurableResource):
     """Dagster-facing resource for Dagster+ Compass.
 
@@ -35,15 +49,32 @@ class CompassResource(ConfigurableResource):
 
         compass.summarize_materialization(run_id="...", asset_key_path=["x"])
         compass.generate_job_runbook(job_name="orders_pipeline")
+
+    **Config-time vs call-time validation.** The URL and token fields
+    default to empty strings so the resource config resolves even when
+    ``EnvVar('DAGSTER_CLOUD_URL')`` can't find the env var. Missing
+    config is only rejected when something actually tries to talk to
+    Compass — raising :class:`CompassNotConfiguredError`, which kit
+    surfaces catch gracefully. That keeps a demo/dev environment
+    loadable without a live tenant.
     """
 
     dagster_cloud_url: str = Field(
+        default="",
         description=(
             "Full Dagster+ GraphQL URL, e.g. "
-            "'https://my-org.dagster.cloud/prod/graphql'."
+            "'https://my-org.dagster.cloud/prod/graphql'. Empty means "
+            "unconfigured — any attempt to call Compass will raise "
+            "CompassNotConfiguredError. Set via EnvVar('DAGSTER_CLOUD_URL')."
         ),
     )
-    api_token: str = Field(description="Dagster+ API token. Use EnvVar.")
+    api_token: str = Field(
+        default="",
+        description=(
+            "Dagster+ API token. Empty means unconfigured. "
+            "Set via EnvVar('DAGSTER_CLOUD_API_TOKEN')."
+        ),
+    )
     timeout_seconds: float = Field(
         default=120.0,
         description="Hard cap per Compass call.",
@@ -51,16 +82,37 @@ class CompassResource(ConfigurableResource):
 
     _client: CompassClient = PrivateAttr()
 
+    def _ensure_configured(self) -> None:
+        """Raise CompassNotConfiguredError if URL or token is unset."""
+        missing: list[str] = []
+        if not self.dagster_cloud_url:
+            missing.append("dagster_cloud_url (DAGSTER_CLOUD_URL)")
+        if not self.api_token:
+            missing.append("api_token (DAGSTER_CLOUD_API_TOKEN)")
+        if missing:
+            raise CompassNotConfiguredError(
+                f"CompassResource is missing: {', '.join(missing)}. "
+                "Set the corresponding env vars and restart. Until then, "
+                "kit surfaces will skip gracefully."
+            )
+
     def setup_for_execution(self, context) -> None:  # noqa: D401
-        """Build the client lazily so env-var substitution has happened first."""
-        self._client = CompassClient(
-            dagster_cloud_url=self.dagster_cloud_url,
-            api_token=self.api_token,
-            timeout_seconds=self.timeout_seconds,
-        )
+        """Build the client lazily so env-var substitution has happened first.
+
+        Does *not* raise on missing config — that check is deferred to
+        call time so a dev environment without Compass env vars can
+        still load and start the code server.
+        """
+        if self.dagster_cloud_url and self.api_token:
+            self._client = CompassClient(
+                dagster_cloud_url=self.dagster_cloud_url,
+                api_token=self.api_token,
+                timeout_seconds=self.timeout_seconds,
+            )
 
     # Build-on-first-use fallback so unit tests without setup_for_execution work
     def _ensure_client(self) -> CompassClient:
+        self._ensure_configured()
         if not hasattr(self, "_client") or self._client is None:
             self._client = CompassClient(
                 dagster_cloud_url=self.dagster_cloud_url,

@@ -55,7 +55,7 @@ from dagster import (
 )
 
 from .models import CascadeDiagnosis
-from .resource import CompassResource
+from .resource import CompassNotConfiguredError, CompassResource
 from .structured import CompassSchemaError
 
 
@@ -168,6 +168,9 @@ def classify_cascade_for_run(
                 return diagnosis, (chat.chat_id or None)
             except CompassSchemaError:
                 return None, (chat.chat_id or None)
+    except CompassNotConfiguredError:
+        # Bubble up — the sensor logs a distinct message for this case.
+        raise
     except Exception:  # noqa: BLE001 - AI outage must never mask the underlying run failure
         return None, None
 
@@ -287,9 +290,19 @@ def compass_classify_cascade_on_failure(
         run_id = run.run_id
         instance = context.instance
 
-        diagnosis, chat_id = classify_cascade_for_run(
-            compass, run_id=run_id, instance=instance
-        )
+        try:
+            diagnosis, chat_id = classify_cascade_for_run(
+                compass, run_id=run_id, instance=instance
+            )
+        except CompassNotConfiguredError as e:
+            context.log.warning(
+                f"compass_cascade_classifier: Compass is not configured "
+                f"(run {run_id}). Skipping classification. {e}"
+            )
+            return SkipReason(
+                "Compass not configured — set DAGSTER_CLOUD_URL and "
+                "DAGSTER_CLOUD_API_TOKEN, then restart."
+            )
 
         if diagnosis is None:
             context.log.info(
