@@ -27,6 +27,39 @@ an official Dagster Labs product.
 | **`DailyInsightDigest` component** | One-YAML-block daily digest — asset + schedule that materialize Compass's answer as markdown. |
 | **`CompassClient`** | Dagster-free sync client. Same features, usable in scripts, FastAPI, notebooks, other orchestrators. |
 
+## Why this vs. calling OpenAI / Claude directly?
+
+You *could* wire raw OpenAI or Claude into a Dagster hook yourself. This kit
+exists because for Dagster-domain questions specifically, Compass has
+structural advantages that aren't worth reimplementing.
+
+**Pick this kit when you want:**
+
+| | dagster-compass-kit | Raw OpenAI / Claude |
+| --- | --- | --- |
+| Access to live Dagster+ operational data | ✅ Built-in — Compass queries `dagster_plus_runs` tables via tool use. No RAG pipeline to build. | ❌ You extract, embed, store, keep fresh. |
+| AI infrastructure | ✅ Nothing to procure — Dagster+ subscription covers it. | ❌ Your API key, your rate limits, your cost budget, your vendor contract. |
+| Compliance boundary | ✅ Data never leaves Dagster+. | ❌ Operational data flows to a third-party processor. |
+| Tool use (SQL against warehouses, chart rendering) | ✅ Pre-wired. | ❌ You define tools, host execution, manage the tool-call loop. |
+| Trust model alignment with the Dagster+ chat widget | ✅ Same AI. Same answers. One audit trail. | ❌ Inconsistent with what the customer sees in the Dagster+ UI. |
+
+**Use raw OpenAI / Claude when you want:**
+
+- **Non-Dagster-domain tasks** — summarizing emails, classifying support
+  tickets, generating SQL from business specs. Compass is scoped to Dagster+
+  operational data; it can't answer *"what does this JIRA ticket mean?"*
+- **A specific model** — you can't pick Compass's underlying model. If your
+  use case requires Claude Opus or GPT-4o specifically, use them directly.
+- **Low latency** — Compass takes 20–40s per call due to agent tool use.
+  Raw LLM calls are 3–5s. For interactive or high-frequency paths, use
+  raw LLMs.
+- **Custom system prompts at the infra level** — with Compass you're a
+  guest in someone else's prompt.
+- **OSS Dagster / air-gapped deployments** — this kit is Dagster+ only.
+
+The short version: **pick this kit when the question is about Dagster+
+itself; pick raw LLMs when the question is about anything else.**
+
 ## Install
 
 ```bash
