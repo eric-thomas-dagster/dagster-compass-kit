@@ -27,6 +27,7 @@ an official Dagster Labs product.
 | **`compass.conversation()`** | Multi-turn chat — `chat_id` is preserved across `chat.ask(...)` calls so follow-ups stay coherent. |
 | **`compass_on_failure()` hook** | On op failure, Compass writes a post-mortem and attaches it to run metadata. Dagster+'s existing Slack/email alerts link to the run page where it renders — this hook doesn't duplicate notifications. |
 | **`compass_create_issue_on_failure()` hook** | On op failure, Compass first checks the open Issues queue and decides: open a new pre-filled issue (title + description + severity + labels), link the run to an existing open issue covering the same failure, or skip filing entirely if the queue is already noisy. Linked to the run + the Compass chat that drafted it. Dedup is on by default — flooding the queue with duplicates is the failure mode this hook is designed to *not* have. |
+| **`compass_classify_cascade_on_failure()` sensor** | Alert-fatigue killer. On run failure, Compass splits the affected assets into `root_cause` vs `cascade` (downstreams that never ran because upstream failed). Emits an `AssetObservation` per affected asset with `compass_root_cause: true/false` as event metadata. Configure your Dagster+ alert policy to filter on that metadata and a 40-asset cascade pages once, not 40 times. |
 | **`@compass_retry_advisor()` decorator** | On exception, Compass decides whether to retry (transient) or terminate (deterministic). |
 | **`compass_asset_check(...)`** | Natural-language asset checks — "is this materialization anomalous?" becomes a first-class Dagster check. |
 | **`compass_sensor(...)`** | Autonomous monitoring — sensor asks Compass each tick whether to launch a job. |
@@ -189,6 +190,52 @@ Why dedup is the default: without it, a flaky job that fails 50× in a
 morning produces 50 issues — the queue becomes useless within a day.
 The Compass call adds ~30s per failure, but it's running in the failure
 hook (off the hot path) and the alternative is a queue you stop reading.
+
+## Quick start — kill the cascade alert spam
+
+The default Dagster+ asset-failure alerting behavior is one alert per
+affected asset. A Snowflake outage that trips a single upstream asset
+and skips 40 downstream ones pages 40 times. The on-call stops reading.
+
+```python
+from dagster import Definitions
+from dagster_compass_kit import CompassResource, compass_classify_cascade_on_failure
+
+defs = Definitions(
+    sensors=[compass_classify_cascade_on_failure()],
+    resources={"compass": CompassResource(...)},
+)
+```
+
+On every failed run the sensor:
+
+1. Walks the event log for planned-but-unmaterialized assets.
+2. Asks Compass to classify each as **root cause** or **cascade**.
+3. Emits an `AssetObservation` on each affected asset carrying
+   `compass_root_cause: true|false` as **event metadata** (plus
+   `compass_explanation`, `compass_run_id`, `compass_chat_id` for the
+   on-call).
+
+Then, in Dagster+:
+
+1. Create an AlertPolicy on **asset observation** events.
+2. Filter event metadata to `compass_root_cause == true`.
+3. Route as normal. Demote or remove the naive all-asset-failure alert.
+
+The 40-asset cascade now pages **once** — on the root cause — with
+Compass's one-sentence explanation attached to the observation. The
+other 39 observations still land (useful for dashboards, lineage
+correlation, post-mortems) but don't page.
+
+Custom metadata keys if `compass_root_cause` collides with an existing
+convention:
+
+```python
+compass_classify_cascade_on_failure(
+    root_cause_metadata_key="is_pageable_root_cause",
+    cascade_metadata_key="suppressed_by_upstream",
+)
+```
 
 ## Quick start — Compass-decided retry
 

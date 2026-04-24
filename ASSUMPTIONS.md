@@ -169,6 +169,23 @@ silently degrades to the old behavior. To turn it off entirely:
 compass_create_issue_on_failure(dedup=False)
 ```
 
+### 5c. Dagster+ alert policies can filter asset observation events by metadata
+
+The cascade classifier (`compass_classify_cascade_on_failure`) writes
+its verdict as **event metadata** on AssetObservation events, not as
+asset-definition tags. The alert-fatigue use case only works if
+Dagster+ AlertPolicies can:
+
+1. Fire on AssetObservation events (not just materialization events).
+2. Filter those events by a predicate on event metadata (e.g.
+   `compass_root_cause == true`).
+
+**User-confirmed April 2026** that this filtering surface exists in
+Dagster+. If your deployment is on a version that predates that
+capability, the cascade classifier still emits the observations and
+tags the run — but the alert-suppression benefit won't materialize
+until you're on a version with metadata-filterable alert policies.
+
 ### 6. Tool surface observed
 
 Compass has used at least these tools during our testing:

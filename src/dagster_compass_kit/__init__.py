@@ -5,6 +5,10 @@ Dagster+-Compass-specific: the kit hits the WebSocket subscription at your
 standalone compass.dagster.io.
 """
 
+from .cascade import (
+    classify_cascade_for_run,
+    compass_classify_cascade_on_failure,
+)
 from .checks import compass_asset_check
 from .client import (
     CompassResponse,
@@ -23,6 +27,7 @@ from .issues import (
 )
 from .models import (
     AnomalyVerdict,
+    CascadeDiagnosis,
     IssueActionPlan,
     IssueDraft,
     MonitoringDecision,
@@ -66,6 +71,8 @@ __all__ = [
     "plan_issue_for_failure",
     "introspect_issue_mutations",
     "IssueMutationSpec",
+    "compass_classify_cascade_on_failure",
+    "classify_cascade_for_run",
     # Structured responses
     "build_structured_prompt",
     "parse_structured",
@@ -73,6 +80,7 @@ __all__ = [
     "CompassSchemaError",
     # Pre-built Pydantic schemas
     "AnomalyVerdict",
+    "CascadeDiagnosis",
     "IssueActionPlan",
     "IssueDraft",
     "MonitoringDecision",

@@ -125,6 +125,39 @@ class IssueDraft(BaseModel):
     )
 
 
+class CascadeDiagnosis(BaseModel):
+    """Compass's root-cause vs cascade classification for a failed run.
+
+    When a run fails, the default Dagster+ alerting behavior is to fire one
+    asset-failure alert per affected asset — so a single upstream outage
+    becomes 40 pages for 40 downstream assets. This schema captures
+    Compass's verdict about which asset(s) are the genuine originating
+    cause and which are cascade (skipped because upstream failed), so
+    alert filters can fire only on the root causes.
+
+    ``root_cause_asset_keys`` typically has one entry. Multiple entries
+    mean Compass identified genuinely independent concurrent failures —
+    rare but possible in fan-out jobs.
+    """
+
+    root_cause_asset_keys: list[str] = Field(
+        description=(
+            "Slash-joined asset keys that are the originating cause(s) of "
+            "the failure, e.g. ['analytics/orders']. Almost always length 1."
+        ),
+    )
+    cascade_asset_keys: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Slash-joined asset keys that didn't run because an upstream "
+            "failed. These are the alerts a naive policy would spray."
+        ),
+    )
+    explanation: str = Field(
+        description="One sentence summarizing what happened and why."
+    )
+
+
 class RunbookSections(BaseModel):
     """Optional structured runbook output — prefer free-form markdown in most cases."""
 
