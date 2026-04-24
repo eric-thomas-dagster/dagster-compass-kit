@@ -9,6 +9,41 @@ own deployment, and so behavior changes in Compass can be spotted quickly.
 
 ## Core assumptions
 
+### 0. The Dagster+ Issues `createIssue` mutation is stable
+
+**Empirically verified April 2026** against a live tenant. The mutation
+the Dagster+ UI itself calls when you click "Generate an issue" is:
+
+```graphql
+mutation CreateIssue(
+  $title: String!,
+  $description: String!,
+  $origin: IssueLinkedObjectInput,   # { runId: "..." } for run-linked
+  $chatId: Int                       # optional link to a Compass chat
+) {
+  createIssue(
+    title: $title,
+    description: $description,
+    origin: $origin,
+    chatId: $chatId
+  ) {
+    __typename
+    ... on CreateIssueSuccess { issue { id publicId title status } }
+    ... on UnauthorizedError { message }
+    ... on PythonError { message }
+  }
+}
+```
+
+The kit hardcodes this shape. If Dagster changes it, ``_CREATE_ISSUE_MUTATION``
+in ``issues.py`` needs a matching update, and custom tenants can override
+via ``custom_mutation_spec=IssueMutationSpec(...)``.
+
+Note: the mutation accepts only ``title`` / ``description`` / ``origin`` /
+``chatId``. There's no first-class ``severity`` or ``labels`` field. The
+kit folds Compass-generated severity + labels into the description body
+as a markdown footer so they're visible inline.
+
 ### 1. The WebSocket subscription surface is stable
 
 We assume these subscriptions exist and accept the documented arguments:
