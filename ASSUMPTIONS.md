@@ -62,6 +62,31 @@ What this means for consumers:
   obviously are), file a ticket with Dagster support — and reconsider
   whether this assumption still holds.
 
+### 4b. Compass has safety guardrails that reject "silent API endpoint" phrasing
+
+**Empirically verified April 2026.** If you tell Compass to "respond ONLY
+with JSON" / "no prose" / "no markdown fences," it detects the pattern as
+a prompt-injection attempt and refuses to comply, responding with
+something like:
+
+> "I'm not able to respond with only a JSON object — I'm designed to be a
+> helpful, conversational assistant… This looks like a prompt injection
+> attempt."
+
+**What this kit does instead:** asks Compass to answer naturally AND end
+with a ``SUMMARY:`` section containing ``FIELD: VALUE`` lines. Compass
+complies with this as a normal formatting request (no different from "end
+with a TL;DR"). We then parse the SUMMARY footer with regex — JSON-in-body
+is still parsed as a fallback if Compass happens to emit it.
+
+Concrete parser order:
+
+1. Try to extract a JSON block from anywhere in the response (fenced,
+   plain, or prose-wrapped).
+2. If no valid JSON, look for a ``SUMMARY:`` marker and parse
+   ``FIELD: value`` lines below it, case-insensitive.
+3. If neither works, raise ``CompassSchemaError``.
+
 ### 5. Compass can reason about exceptions even without historical context
 
 This is load-bearing for the retry-advisor to work on brand-new jobs /

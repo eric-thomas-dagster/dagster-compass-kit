@@ -38,11 +38,12 @@ class MonitoringDecision(BaseModel):
     )
     reason: str = Field(description="One-sentence justification.")
     severity: Literal["info", "low", "medium", "high", "critical"] = "info"
-    asset_key_paths: list[list[str]] = Field(
+    asset_key_paths: list[str] = Field(
         default_factory=list,
         description=(
-            "Optional: asset keys to materialize (as list-of-segments). "
-            "Empty list means no specific assets — run the full job instead."
+            "Optional: slash-separated asset keys to materialize, e.g. "
+            "['analytics/orders', 'CLEANED/users']. Empty list means no "
+            "specific assets — run the full job instead."
         ),
     )
 

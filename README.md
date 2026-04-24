@@ -35,6 +35,17 @@ pip install 'dagster-compass-kit[slack]'       # + Slack posting
 pip install 'dagster-compass-kit[components]'  # + dagster-components YAML support
 ```
 
+## How `ask_structured` actually works
+
+> Compass has safety guardrails that refuse "silent API endpoint" / JSON-only
+> prompts — it detects them as prompt-injection attempts. This kit works
+> around that by asking Compass to answer naturally AND end with a
+> ``SUMMARY:`` section of ``FIELD: VALUE`` lines (the way you'd ask for a
+> TL;DR). We parse that footer with regex; JSON anywhere in the response
+> is parsed too as a fallback. See
+> [ASSUMPTIONS.md §4b](ASSUMPTIONS.md#4b-compass-has-safety-guardrails-that-reject-silent-api-endpoint-phrasing)
+> for the full finding.
+
 ## Quick start — resource + structured
 
 ```python
