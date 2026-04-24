@@ -70,10 +70,16 @@ itself; pick raw LLMs when the question is about anything else.**
 
 ## Install
 
+Not on PyPI. Install directly from GitHub:
+
 ```bash
-pip install dagster-compass-kit
-pip install 'dagster-compass-kit[components]'  # + dagster-components YAML support
+pip install "dagster-compass-kit @ git+https://github.com/eric-thomas-dagster/dagster-compass-kit.git@main"
+
+# Or pin to a tag:
+pip install "dagster-compass-kit @ git+https://github.com/eric-thomas-dagster/dagster-compass-kit.git@v0.4.0"
 ```
+
+For the optional YAML-components extra, append `[components]` after the package name (before the `@`): e.g. `dagster-compass-kit[components] @ git+https://…`.
 
 ## How `ask_structured` actually works
 
@@ -89,7 +95,7 @@ pip install 'dagster-compass-kit[components]'  # + dagster-components YAML suppo
 ## Quick start — resource + structured
 
 ```python
-from dagster import asset, Definitions, EnvVar, MaterializeResult, MetadataValue
+from dagster import asset, Definitions, MaterializeResult, MetadataValue
 from pydantic import BaseModel
 from dagster_compass_kit import CompassResource
 
@@ -113,10 +119,11 @@ def health_snapshot(compass: CompassResource) -> MaterializeResult:
 defs = Definitions(
     assets=[health_snapshot],
     resources={
-        "compass": CompassResource(
-            dagster_cloud_url=EnvVar("DAGSTER_CLOUD_URL"),
-            api_token=EnvVar("DAGSTER_CLOUD_API_TOKEN"),
-        ),
+        # Reads DAGSTER_CLOUD_URL + DAGSTER_CLOUD_API_TOKEN from the environment
+        # with graceful fallback — code location loads even if they're unset,
+        # and CompassNotConfiguredError fires at call time if anything actually
+        # tries to reach Compass. Prefer this over EnvVar(...) in most cases.
+        "compass": CompassResource.from_env(),
     },
 )
 ```
@@ -203,7 +210,7 @@ from dagster_compass_kit import CompassResource, compass_classify_cascade_on_fai
 
 defs = Definitions(
     sensors=[compass_classify_cascade_on_failure()],
-    resources={"compass": CompassResource(...)},
+    resources={"compass": CompassResource.from_env()},
 )
 ```
 
@@ -400,9 +407,11 @@ them against your own deployment. Highlights:
 
 See module docstrings for full parameter detail. Highlights:
 
-- `CompassResource(dagster_cloud_url=, api_token=, timeout_seconds=120)`
+- `CompassResource(dagster_cloud_url="", api_token="", timeout_seconds=120)` — empty defaults; `CompassResource.from_env()` is the usual path.
 - `compass_on_failure(prompt=, resource_key=, metadata_key=)`
-- `compass_retry_advisor(max_attempts=3, on_parse_failure='raise', wait_cap_seconds=120)`
+- `compass_create_issue_on_failure(resource_key=, dedup=True, dedup_window_hours=24, create_via_graphql=True, create_via_cli=False, ...)`
+- `compass_classify_cascade_on_failure(name="compass_cascade_classifier", check_name="compass_root_cause_detected", cascade_metadata_key="compass_cascade_of", monitored_jobs=None)`
+- `compass_retry_advisor(max_attempts=3, on_parse_failure='raise', wait_cap_seconds=120, fallback_to_heuristic=False)`
 - `compass_asset_check(asset=, prompt=, severity_mapper=, blocking=False)`
 - `compass_sensor(job=, prompt=, minimum_interval_seconds=300, should_trigger=, default_status=STOPPED)`
 
@@ -415,12 +424,18 @@ See module docstrings for full parameter detail. Highlights:
 - Streamed chunks (`DeltaTextBlock`, tool blocks, completion) assembled into
   a single `CompassResponse`. Direct chunk access via `stream_ai_chat(...)`
   for real-time consumers.
-- Structured responses use a JSON-schema instruction footer plus a forgiving
-  parser that handles ```` ```json ```` fences and prose-wrapped JSON.
+- Structured responses ask Compass to answer naturally and end with a
+  ``SUMMARY:`` section of ``FIELD: VALUE`` lines — the way you'd ask for a
+  TL;DR. We parse that footer with regex; JSON-in-response is parsed too
+  as a fallback. This sidesteps Compass's prompt-injection guardrails
+  (see [ASSUMPTIONS.md §4b](ASSUMPTIONS.md)).
 
 ## Security
 
-- API tokens are secrets — wire through `EnvVar` or a secrets manager.
+- API tokens are secrets — `CompassResource.from_env()` reads them from the
+  environment (Dagster+ injects configured deployment secrets as real env vars).
+  `EnvVar(...)` works too but fails the whole code location if unset; `from_env`
+  tolerates unset and errors only at call time.
 - Compass responses are markdown. If you render them outside Dagster's UI,
   allow-list URL schemes (today's responses don't contain links but that could
   change).
