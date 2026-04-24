@@ -14,7 +14,12 @@ from .client import (
 )
 from .compass_client import CompassClient, CompassConversation
 from .hooks import compass_on_failure
-from .issues import compass_create_issue_on_failure, draft_issue_for_failure
+from .issues import (
+    IssueMutationSpec,
+    compass_create_issue_on_failure,
+    draft_issue_for_failure,
+    introspect_issue_mutations,
+)
 from .models import AnomalyVerdict, IssueDraft, MonitoringDecision, RunbookSections
 from .resource import CompassResource
 from .retry import (
@@ -51,6 +56,8 @@ __all__ = [
     "compass_sensor",
     "compass_create_issue_on_failure",
     "draft_issue_for_failure",
+    "introspect_issue_mutations",
+    "IssueMutationSpec",
     # Structured responses
     "build_structured_prompt",
     "parse_structured",
