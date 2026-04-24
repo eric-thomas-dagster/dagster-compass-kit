@@ -48,7 +48,7 @@ from typing import Any, Callable, Optional
 
 from dagster import HookContext, MetadataValue, failure_hook
 
-from .models import IssueDraft
+from .models import IssueActionPlan, IssueDraft
 from .resource import CompassResource
 from .structured import CompassSchemaError
 
@@ -184,6 +184,43 @@ suggest labels that would route this to the right owner.
 """
 
 
+_ISSUE_PLAN_PROMPT_TEMPLATE = """\
+A Dagster pipeline just failed and I need to decide whether to open a new
+Dagster+ Issue, link it to an existing open issue, or skip filing entirely
+(if the queue is already noisy with this exact failure).
+
+Failure context:
+- Job: {job_name}
+- Run ID: {run_id}
+- Failing op/step: {step_key}
+- Exception type: {exc_type}
+- Exception message: {exc_message}
+
+You have access to the Dagster+ operational data including the Issues
+table. Please:
+
+1. Check the open Dagster+ Issues in this deployment from the last
+   {dedup_window_hours} hours. Look for issues that already cover this
+   failure — same job + step + exception class, or a clearly related root
+   cause. Use the issue's publicId (a short string like "issue-42") as the
+   identifier.
+2. Decide ACTION:
+   - "create_new" — this is a genuinely new problem, no existing open
+     issue covers it. Populate title / description / severity /
+     suggested_labels.
+   - "link_to_existing" — there's already an open issue covering this
+     failure. Set EXISTING_ISSUE_PUBLIC_ID to its publicId. Leave the
+     draft fields blank.
+   - "skip" — we've already filed many issues like this recently and
+     nothing has changed; filing another would just be noise.
+
+If creating a new issue: write a concise title (under 90 chars), a
+markdown description covering what happened / likely root cause /
+similar recent failures / first-response actions, pick a severity, and
+suggest labels.
+"""
+
+
 def draft_issue_for_failure(
     compass: CompassResource,
     *,
@@ -219,6 +256,54 @@ def draft_issue_for_failure(
             try:
                 draft = chat.ask_structured(prompt, schema=IssueDraft)
                 return draft, (chat.chat_id or None)
+            except CompassSchemaError:
+                return None, (chat.chat_id or None)
+    except Exception:  # noqa: BLE001 - never let a broken Compass mask the real failure
+        return None, None
+
+
+def plan_issue_for_failure(
+    compass: CompassResource,
+    *,
+    job_name: str,
+    run_id: str,
+    step_key: str,
+    exc: BaseException,
+    dedup_window_hours: int = 24,
+) -> tuple[Optional[IssueActionPlan], Optional[int]]:
+    """Ask Compass to *decide* what to do with a failure, not just draft an issue.
+
+    Compass checks recent open Dagster+ Issues in the deployment and returns
+    one of three actions:
+
+      - ``create_new``         — file a fresh issue (draft fields populated)
+      - ``link_to_existing``   — there's already an open issue; reference it
+      - ``skip``               — too noisy, don't file another
+
+    Combined decide-and-draft into a single Compass call so we pay one
+    ~30s round-trip per failure instead of two. See :class:`IssueActionPlan`.
+
+    Args:
+        dedup_window_hours: How far back to look for existing issues. Default
+            24h is conservative for most pipelines; tighten for very-noisy
+            jobs or loosen for slow-burn issues that stay open for days.
+
+    Returns ``(plan, chat_id)`` with the same ``None``-permissive semantics
+    as :func:`draft_issue_for_failure`.
+    """
+    prompt = _ISSUE_PLAN_PROMPT_TEMPLATE.format(
+        job_name=job_name,
+        run_id=run_id,
+        step_key=step_key,
+        exc_type=type(exc).__name__,
+        exc_message=str(exc)[:500],
+        dedup_window_hours=dedup_window_hours,
+    )
+    try:
+        with compass.conversation() as chat:
+            try:
+                plan = chat.ask_structured(prompt, schema=IssueActionPlan)
+                return plan, (chat.chat_id or None)
             except CompassSchemaError:
                 return None, (chat.chat_id or None)
     except Exception:  # noqa: BLE001 - never let a broken Compass mask the real failure
@@ -395,8 +480,19 @@ def compass_create_issue_on_failure(
     create_via_graphql: bool = True,
     create_via_cli: bool = False,
     custom_mutation_spec: Optional[IssueMutationSpec] = None,
+    dedup: bool = True,
+    dedup_window_hours: int = 24,
 ):
     """Return a Dagster failure hook that opens a Dagster+ Issue on failure.
+
+    **Dedup, by default.** Compass first checks the open Issues queue and
+    decides whether to create a new issue, link the run to an existing
+    open issue covering the same failure, or skip filing entirely (because
+    the queue is already noisy with this exact problem). This is the
+    flood-prevention behavior — without it, every flaky run creates a
+    fresh issue and the queue becomes useless within a day. See
+    :class:`IssueActionPlan`. Pass ``dedup=False`` to revert to the
+    naive always-create behavior.
 
     Creation path (tried in order):
       1. **GraphQL** (default) — hits the ``createIssue`` mutation on your
@@ -425,6 +521,12 @@ def compass_create_issue_on_failure(
         custom_mutation_spec: Escape hatch for non-standard tenants where
             ``createIssue`` has a different shape. Shouldn't be needed in
             practice.
+        dedup: When True (default), Compass decides between
+            create_new / link_to_existing / skip before any issue is
+            created. When False, every failure creates a new issue (the
+            old behavior).
+        dedup_window_hours: How far back Compass should look for existing
+            issues that might already cover this failure. Default 24h.
 
     Example::
 
@@ -441,25 +543,58 @@ def compass_create_issue_on_failure(
         compass: CompassResource = getattr(context.resources, resource_key)
 
         exc = context.op_exception or RuntimeError("unknown failure")
-        draft, chat_id = draft_issue_for_failure(
-            compass,
-            job_name=context.job_name,
-            run_id=context.run_id,
-            step_key=context.op.name,
-            exc=exc,
-        )
 
-        if draft is None:
-            context.log.warning(
-                "compass_create_issue_on_failure: Compass failed to draft issue; "
-                "no issue will be created."
+        if dedup:
+            plan, chat_id = plan_issue_for_failure(
+                compass,
+                job_name=context.job_name,
+                run_id=context.run_id,
+                step_key=context.op.name,
+                exc=exc,
+                dedup_window_hours=dedup_window_hours,
             )
-            return
 
-        if chat_id:
-            context.log.info(
-                f"compass_create_issue_on_failure: drafted via Compass chat {chat_id}"
+            if plan is None:
+                context.log.warning(
+                    "compass_create_issue_on_failure: Compass failed to plan; "
+                    "no issue will be created."
+                )
+                return
+
+            if chat_id:
+                context.log.info(
+                    f"compass_create_issue_on_failure: planned via Compass chat "
+                    f"{chat_id} → action={plan.action} ({plan.reason})"
+                )
+
+            if plan.action == "skip":
+                _tag_run_skipped(context, plan, chat_id)
+                return
+
+            if plan.action == "link_to_existing":
+                _tag_run_linked(context, plan, chat_id)
+                return
+
+            # create_new: fall through into creation flow
+            draft = plan.to_draft()
+        else:
+            draft, chat_id = draft_issue_for_failure(
+                compass,
+                job_name=context.job_name,
+                run_id=context.run_id,
+                step_key=context.op.name,
+                exc=exc,
             )
+            if draft is None:
+                context.log.warning(
+                    "compass_create_issue_on_failure: Compass failed to draft issue; "
+                    "no issue will be created."
+                )
+                return
+            if chat_id:
+                context.log.info(
+                    f"compass_create_issue_on_failure: drafted via Compass chat {chat_id}"
+                )
 
         created = False
         detail = ""
@@ -514,6 +649,7 @@ def compass_create_issue_on_failure(
                 # full draft in the run's event log via the logger.
                 short_tag = (draft.title or "")[:180]
                 tags = {
+                    "dagster-compass/issue_action": "create_new",
                     "dagster-compass/issue_draft_title": short_tag,
                     "dagster-compass/issue_draft_severity": draft.severity,
                     "dagster-compass/issue_created": "true" if created else "false",
@@ -534,3 +670,53 @@ def compass_create_issue_on_failure(
             )
 
     return _hook
+
+
+def _tag_run_skipped(
+    context: HookContext, plan: IssueActionPlan, chat_id: Optional[int]
+) -> None:
+    context.log.info(
+        f"compass_create_issue_on_failure: skipping issue creation for run "
+        f"{context.run_id} — {plan.reason}"
+    )
+    try:
+        from dagster import DagsterInstance
+
+        instance = (
+            context.instance if hasattr(context, "instance") else DagsterInstance.get()
+        )
+        tags = {
+            "dagster-compass/issue_action": "skip",
+            "dagster-compass/issue_skip_reason": plan.reason[:180],
+        }
+        if chat_id:
+            tags["dagster-compass/compass_chat_id"] = str(chat_id)
+        instance.add_run_tags(context.run_id, tags)
+    except Exception as e:  # noqa: BLE001
+        context.log.warning(f"compass_create_issue_on_failure: skip-tag failed: {e!r}")
+
+
+def _tag_run_linked(
+    context: HookContext, plan: IssueActionPlan, chat_id: Optional[int]
+) -> None:
+    existing = plan.existing_issue_public_id or "(unknown)"
+    context.log.info(
+        f"compass_create_issue_on_failure: linking run {context.run_id} to "
+        f"existing issue {existing} — {plan.reason}"
+    )
+    try:
+        from dagster import DagsterInstance
+
+        instance = (
+            context.instance if hasattr(context, "instance") else DagsterInstance.get()
+        )
+        tags = {
+            "dagster-compass/issue_action": "link_to_existing",
+            "dagster-compass/linked_issue_public_id": existing,
+            "dagster-compass/issue_link_reason": plan.reason[:180],
+        }
+        if chat_id:
+            tags["dagster-compass/compass_chat_id"] = str(chat_id)
+        instance.add_run_tags(context.run_id, tags)
+    except Exception as e:  # noqa: BLE001
+        context.log.warning(f"compass_create_issue_on_failure: link-tag failed: {e!r}")

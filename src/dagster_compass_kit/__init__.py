@@ -19,8 +19,15 @@ from .issues import (
     compass_create_issue_on_failure,
     draft_issue_for_failure,
     introspect_issue_mutations,
+    plan_issue_for_failure,
 )
-from .models import AnomalyVerdict, IssueDraft, MonitoringDecision, RunbookSections
+from .models import (
+    AnomalyVerdict,
+    IssueActionPlan,
+    IssueDraft,
+    MonitoringDecision,
+    RunbookSections,
+)
 from .resource import CompassResource
 from .retry import (
     ExceptionAnalysis,
@@ -56,6 +63,7 @@ __all__ = [
     "compass_sensor",
     "compass_create_issue_on_failure",
     "draft_issue_for_failure",
+    "plan_issue_for_failure",
     "introspect_issue_mutations",
     "IssueMutationSpec",
     # Structured responses
@@ -65,6 +73,7 @@ __all__ = [
     "CompassSchemaError",
     # Pre-built Pydantic schemas
     "AnomalyVerdict",
+    "IssueActionPlan",
     "IssueDraft",
     "MonitoringDecision",
     "RunbookSections",

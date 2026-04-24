@@ -6,7 +6,7 @@ your own Pydantic models for anything exotic.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -46,6 +46,56 @@ class MonitoringDecision(BaseModel):
             "specific assets — run the full job instead."
         ),
     )
+
+
+class IssueActionPlan(BaseModel):
+    """Compass's decision about what to do with a new pipeline failure.
+
+    Used by ``compass_create_issue_on_failure`` to avoid flooding the
+    Dagster+ Issues queue with duplicate or redundant tickets. Compass
+    checks recent open issues in the deployment (it has access to them
+    through the same operational data surface) and decides:
+
+    - ``create_new``  — genuinely new problem, draft fields populated
+    - ``link_to_existing`` — there's already an open issue that covers
+      this failure; ``existing_issue_public_id`` points to it so the
+      hook can attach a link/tag to the new run
+    - ``skip`` — intentionally noisy (e.g. we've already filed 10 of
+      these in the last hour and nothing has changed)
+
+    The combined decide-and-draft schema keeps the whole flow to a single
+    Compass call — one ~30s round-trip per failure instead of two.
+    """
+
+    action: Literal["create_new", "link_to_existing", "skip"] = Field(
+        description="What to do with this failure."
+    )
+    reason: str = Field(description="One sentence justifying the decision.")
+    existing_issue_public_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "If action is 'link_to_existing', the publicId of the issue that "
+            "already covers this failure. Empty otherwise."
+        ),
+    )
+    # When action == 'create_new', these fields drive the new issue
+    title: Optional[str] = Field(
+        default=None, description="New-issue title. Only set when action is create_new."
+    )
+    description: Optional[str] = Field(
+        default=None, description="New-issue description (markdown). Only set when action is create_new."
+    )
+    severity: Literal["low", "medium", "high", "critical"] = Field(default="medium")
+    suggested_labels: list[str] = Field(default_factory=list)
+
+    def to_draft(self) -> "IssueDraft":
+        """Extract the draft fields as an ``IssueDraft`` for the creation path."""
+        return IssueDraft(
+            title=self.title or "(untitled)",
+            description=self.description or "(no description)",
+            severity=self.severity,
+            suggested_labels=self.suggested_labels,
+        )
 
 
 class IssueDraft(BaseModel):

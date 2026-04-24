@@ -26,7 +26,7 @@ an official Dagster Labs product.
 | **`CompassResource`** | Ask Compass from any asset/op. `compass.ask(prompt)` returns prose; `compass.ask_structured(prompt, PydanticModel)` returns a typed object. |
 | **`compass.conversation()`** | Multi-turn chat — `chat_id` is preserved across `chat.ask(...)` calls so follow-ups stay coherent. |
 | **`compass_on_failure()` hook** | On op failure, Compass writes a post-mortem and attaches it to run metadata. Dagster+'s existing Slack/email alerts link to the run page where it renders — this hook doesn't duplicate notifications. |
-| **`compass_create_issue_on_failure()` hook** | On op failure, Compass drafts a Dagster+ Issue (title + description + severity + labels) and opens it via `dg api issue create`, linked to the run. Zero manual triage — failures arrive as pre-filled issues in the Dagster+ UI. |
+| **`compass_create_issue_on_failure()` hook** | On op failure, Compass first checks the open Issues queue and decides: open a new pre-filled issue (title + description + severity + labels), link the run to an existing open issue covering the same failure, or skip filing entirely if the queue is already noisy. Linked to the run + the Compass chat that drafted it. Dedup is on by default — flooding the queue with duplicates is the failure mode this hook is designed to *not* have. |
 | **`@compass_retry_advisor()` decorator** | On exception, Compass decides whether to retry (transient) or terminate (deterministic). |
 | **`compass_asset_check(...)`** | Natural-language asset checks — "is this materialization anomalous?" becomes a first-class Dagster check. |
 | **`compass_sensor(...)`** | Autonomous monitoring — sensor asks Compass each tick whether to launch a job. |
@@ -148,6 +148,47 @@ On op failure, Compass gets the job name, run id, and failing step; writes a
 summary grounded in recent history; attaches it as a run tag where Dagster+'s
 existing Slack/email alerts link. No parallel notifications — the kit
 enriches the run, the existing alert does the broadcasting.
+
+## Quick start — auto-filed Dagster+ Issue (with dedup)
+
+```python
+from dagster import job
+from dagster_compass_kit import compass_create_issue_on_failure
+
+@job(hooks={compass_create_issue_on_failure()})  # dedup is on by default
+def orders_pipeline():
+    orders_etl()
+```
+
+On op failure Compass first checks the open Issues queue (last 24h by
+default), then decides:
+
+- **`create_new`** — genuinely new problem. Compass drafts the title +
+  description + severity + labels and `createIssue` files it, linked to
+  the run *and* to the Compass chat that drafted it.
+- **`link_to_existing`** — there's already an open issue covering this
+  failure. The run gets tagged with the existing issue's `publicId` so
+  the dashboard correlates without filing a duplicate.
+- **`skip`** — already too many of these in the recent window;
+  Compass returns the reason and the run is tagged with it. No new
+  ticket, no noise.
+
+Tighten the dedup window for noisy jobs:
+
+```python
+compass_create_issue_on_failure(dedup_window_hours=2)
+```
+
+Or revert to the naive always-create behavior:
+
+```python
+compass_create_issue_on_failure(dedup=False)
+```
+
+Why dedup is the default: without it, a flaky job that fails 50× in a
+morning produces 50 issues — the queue becomes useless within a day.
+The Compass call adds ~30s per failure, but it's running in the failure
+hook (off the hot path) and the alternative is a queue you stop reading.
 
 ## Quick start — Compass-decided retry
 

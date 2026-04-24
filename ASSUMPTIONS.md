@@ -147,6 +147,28 @@ def fetch_orders(context): ...
 
 See `heuristic_classify()` in `retry.py` for the fallback table.
 
+### 5b. Compass can query open Dagster+ Issues for dedup
+
+The dedup mode of `compass_create_issue_on_failure` (the default) asks
+Compass to check the Issues queue before filing a new one. This relies on
+Compass's `TOOL_TYPE_RUN_SQL_QUERY` having read access to the same
+operational table the Dagster+ UI's Issues view reads from.
+
+What we've observed: Compass can answer "what issues are open right now?"
+correctly via SQL against the operational dataset. We expect the dedup
+prompt to ride on the same path. **Not yet validated end-to-end against a
+flooded queue** — once integration tests run on a tenant where we can
+populate fake duplicate failures, this will move from "expected" to
+"verified."
+
+If Compass can't see Issues for your tenant (e.g. permissions vary), the
+dedup pass returns `action=create_new` for everything and the dedup
+silently degrades to the old behavior. To turn it off entirely:
+
+```python
+compass_create_issue_on_failure(dedup=False)
+```
+
 ### 6. Tool surface observed
 
 Compass has used at least these tools during our testing:
