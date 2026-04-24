@@ -26,13 +26,13 @@ from __future__ import annotations
 
 import functools
 import hashlib
-import json
-import re
 import traceback as _traceback
-from dataclasses import dataclass
-from typing import Any, Callable, Literal, Optional
+from typing import Callable, Literal, Optional
 
 from dagster import Failure, OpExecutionContext, RetryRequested
+from pydantic import BaseModel, Field
+
+from .structured import CompassSchemaError, parse_structured
 
 _CLASSIFY_PROMPT = """\
 You're analyzing a Dagster pipeline exception to decide if it's worth retrying.
@@ -66,16 +66,17 @@ Rules of thumb for when history is unavailable:
 - Schema / data-contract violations → data_quality
 - Upstream-service 5xx or unauthorized → dependency
 
-Respond ONLY with a single JSON object, no prose, no markdown fences. Schema:
+Please explain your analysis naturally. Then, so I can record your answer
+programmatically, end your response with a section labeled exactly
+"SUMMARY:" on its own line, followed by these fields on separate lines:
 
-{{
-  "should_retry": true | false,
-  "retry_after_seconds": <integer 0..600>,
-  "category": "transient" | "deterministic" | "data_quality" | "dependency" | "unknown",
-  "confidence": "low" | "medium" | "high",
-  "reason": "<one sentence>",
-  "similar_failures_recently": <integer — 0 if no history available>
-}}
+SUMMARY:
+  SHOULD_RETRY: YES/NO
+  RETRY_AFTER_SECONDS: <integer 0..600>
+  CATEGORY: transient/deterministic/data_quality/dependency/unknown
+  CONFIDENCE: low/medium/high
+  REASON: <one sentence>
+  SIMILAR_FAILURES_RECENTLY: <integer, 0 if no history>
 """
 
 
@@ -218,17 +219,22 @@ def heuristic_classify(exc: BaseException) -> "ExceptionAnalysis | None":
     return None
 
 
-@dataclass
-class ExceptionAnalysis:
-    """Compass's verdict on whether an exception is worth retrying."""
+class ExceptionAnalysis(BaseModel):
+    """Compass's verdict on whether an exception is worth retrying.
+
+    Pydantic model so it plugs directly into :func:`parse_structured` /
+    :func:`build_structured_prompt` in the shared structured layer.
+    """
 
     should_retry: bool
-    retry_after_seconds: int
-    category: Literal["transient", "deterministic", "data_quality", "dependency", "unknown"]
-    confidence: Literal["low", "medium", "high"]
-    reason: str
-    similar_failures_recently: int
-    raw_response: str  # for debugging / metadata attachment
+    retry_after_seconds: int = 0
+    category: Literal["transient", "deterministic", "data_quality", "dependency", "unknown"] = (
+        "unknown"
+    )
+    confidence: Literal["low", "medium", "high"] = "low"
+    reason: str = ""
+    similar_failures_recently: int = 0
+    raw_response: str = Field(default="", exclude=True)
 
     @classmethod
     def unknown(cls, reason: str, raw: str = "") -> "ExceptionAnalysis":
@@ -241,25 +247,6 @@ class ExceptionAnalysis:
             similar_failures_recently=0,
             raw_response=raw,
         )
-
-
-_JSON_BLOCK_RE = re.compile(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", re.DOTALL)
-
-
-def _extract_json(text: str) -> Optional[dict[str, Any]]:
-    """Pull the first JSON object out of a possibly-markdown-fenced response."""
-    if not text:
-        return None
-    # Strip common ```json ... ``` fences up front
-    stripped = re.sub(r"^```(?:json)?\s*", "", text.strip())
-    stripped = re.sub(r"\s*```\s*$", "", stripped)
-    candidates = [stripped] + _JSON_BLOCK_RE.findall(text)
-    for candidate in candidates:
-        try:
-            return json.loads(candidate)
-        except (json.JSONDecodeError, ValueError):
-            continue
-    return None
 
 
 def _truncate(s: str, limit: int) -> str:
@@ -290,29 +277,18 @@ def _build_prompt(
 
 
 def parse_analysis(raw_text: str) -> ExceptionAnalysis:
-    """Parse Compass's markdown-or-JSON response into an ``ExceptionAnalysis``.
+    """Parse Compass's response into an ``ExceptionAnalysis``.
 
-    Falls back to ``ExceptionAnalysis.unknown`` if the response doesn't
-    contain parseable JSON — never raises.
+    Uses the shared ``parse_structured`` extractor (JSON-anywhere first,
+    then SUMMARY signal-phrase footer). Never raises — unparseable
+    responses come back as ``ExceptionAnalysis.unknown``.
     """
-    parsed = _extract_json(raw_text)
-    if not parsed:
-        return ExceptionAnalysis.unknown(
-            reason="Compass response not parseable as JSON",
-            raw=raw_text[:500],
-        )
     try:
-        return ExceptionAnalysis(
-            should_retry=bool(parsed.get("should_retry", False)),
-            retry_after_seconds=int(parsed.get("retry_after_seconds", 0) or 0),
-            category=parsed.get("category", "unknown") or "unknown",
-            confidence=parsed.get("confidence", "low") or "low",
-            reason=str(parsed.get("reason", "") or ""),
-            similar_failures_recently=int(parsed.get("similar_failures_recently", 0) or 0),
-            raw_response=raw_text[:500],
-        )
-    except (ValueError, TypeError) as e:
-        return ExceptionAnalysis.unknown(reason=f"malformed JSON: {e}", raw=raw_text[:500])
+        analysis = parse_structured(raw_text, ExceptionAnalysis)
+    except CompassSchemaError as e:
+        return ExceptionAnalysis.unknown(reason=str(e), raw=raw_text[:500])
+    analysis.raw_response = raw_text[:500]
+    return analysis
 
 
 def exception_fingerprint(exc: BaseException) -> str:
