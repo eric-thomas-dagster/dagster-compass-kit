@@ -99,4 +99,4 @@ __all__ = [
     "stream_ai_summary_for_asset",
 ]
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"

@@ -232,7 +232,6 @@ def _emit_classification_observations(
 def compass_classify_cascade_on_failure(
     *,
     name: str = "compass_cascade_classifier",
-    resource_key: str = "compass",
     root_cause_metadata_key: str = "compass_root_cause",
     cascade_metadata_key: str = "compass_cascade_of",
     monitored_jobs: Optional[list[Any]] = None,
@@ -262,9 +261,15 @@ def compass_classify_cascade_on_failure(
     filter event metadata ``compass_root_cause == true`` to route only
     root-cause alerts.
 
+    **Resource wiring:** the Compass resource must be registered under
+    the key ``compass`` in ``Definitions.resources``. Modern Dagster
+    sensors bind resources by parameter name, and ``run_failure_sensor``
+    doesn't expose a configurable ``required_resource_keys`` kwarg — so
+    the key is fixed. If you need a different key, build your own
+    sensor with :func:`classify_cascade_for_run`.
+
     Args:
         name: Sensor name as it appears in Dagster+.
-        resource_key: Resource key holding the ``CompassResource``.
         root_cause_metadata_key: Metadata field name the alert policy
             will filter on. Override only if it collides with an
             existing metadata convention in your deployment.
@@ -277,8 +282,7 @@ def compass_classify_cascade_on_failure(
         name=name,
         monitored_jobs=monitored_jobs,
     )
-    def _sensor(context: RunFailureSensorContext):
-        compass: CompassResource = getattr(context.resources, resource_key)
+    def _sensor(context: RunFailureSensorContext, compass: CompassResource):
         run = context.dagster_run
         run_id = run.run_id
         instance = context.instance

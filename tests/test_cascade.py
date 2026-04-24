@@ -44,10 +44,9 @@ def test_sensor_factory_returns_sensor():
     assert sensor.name == "compass_cascade_classifier"
 
 
-def test_sensor_factory_accepts_custom_keys_and_name():
+def test_sensor_factory_accepts_custom_name_and_metadata_keys():
     sensor = compass_classify_cascade_on_failure(
         name="my_cascade",
-        resource_key="compass_prod",
         root_cause_metadata_key="is_root_cause",
         cascade_metadata_key="suppressed_by",
     )
