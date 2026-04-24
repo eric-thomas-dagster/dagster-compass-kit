@@ -20,6 +20,7 @@ an official Dagster Labs product.
 | **`CompassResource`** | Ask Compass from any asset/op. `compass.ask(prompt)` returns prose; `compass.ask_structured(prompt, PydanticModel)` returns a typed object. |
 | **`compass.conversation()`** | Multi-turn chat — `chat_id` is preserved across `chat.ask(...)` calls so follow-ups stay coherent. |
 | **`compass_on_failure()` hook** | On op failure, Compass writes a post-mortem, attaches to run metadata, optionally posts to Slack. |
+| **`compass_create_issue_on_failure()` hook** | On op failure, Compass drafts a Dagster+ Issue (title + description + severity + labels) and opens it via `dg api issue create`, linked to the run. Zero manual triage — failures arrive as pre-filled issues in the Dagster+ UI. |
 | **`@compass_retry_advisor()` decorator** | On exception, Compass decides whether to retry (transient) or terminate (deterministic). |
 | **`compass_asset_check(...)`** | Natural-language asset checks — "is this materialization anomalous?" becomes a first-class Dagster check. |
 | **`compass_sensor(...)`** | Autonomous monitoring — sensor asks Compass each tick whether to launch a job. |

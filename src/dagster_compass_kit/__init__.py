@@ -14,7 +14,8 @@ from .client import (
 )
 from .compass_client import CompassClient, CompassConversation
 from .hooks import compass_on_failure
-from .models import AnomalyVerdict, MonitoringDecision, RunbookSections
+from .issues import compass_create_issue_on_failure, draft_issue_for_failure
+from .models import AnomalyVerdict, IssueDraft, MonitoringDecision, RunbookSections
 from .resource import CompassResource
 from .retry import (
     ExceptionAnalysis,
@@ -48,6 +49,8 @@ __all__ = [
     "compass_retry_advisor",
     "compass_asset_check",
     "compass_sensor",
+    "compass_create_issue_on_failure",
+    "draft_issue_for_failure",
     # Structured responses
     "build_structured_prompt",
     "parse_structured",
@@ -55,6 +58,7 @@ __all__ = [
     "CompassSchemaError",
     # Pre-built Pydantic schemas
     "AnomalyVerdict",
+    "IssueDraft",
     "MonitoringDecision",
     "RunbookSections",
     # Retry-advisor helpers

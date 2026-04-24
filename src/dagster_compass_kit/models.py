@@ -48,6 +48,33 @@ class MonitoringDecision(BaseModel):
     )
 
 
+class IssueDraft(BaseModel):
+    """Schema for a Dagster+ Issue generated from a run failure.
+
+    Matches the UI's "Generate an issue" flow: a title, a detailed
+    description, and optional tags the user's on-call process might key on.
+    """
+
+    title: str = Field(description="Short headline, under ~90 chars.")
+    description: str = Field(
+        description=(
+            "Markdown body explaining what happened, root cause if discernible, "
+            "and first-response actions. Reference the run and the failing step."
+        )
+    )
+    severity: Literal["low", "medium", "high", "critical"] = Field(
+        default="medium",
+        description="Operator-visible urgency level.",
+    )
+    suggested_labels: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Optional free-form labels for routing. Common choices: "
+            "'transient', 'schema-drift', 'oom', 'dependency-outage', 'needs-triage'."
+        ),
+    )
+
+
 class RunbookSections(BaseModel):
     """Optional structured runbook output — prefer free-form markdown in most cases."""
 
