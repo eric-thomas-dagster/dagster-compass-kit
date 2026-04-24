@@ -8,7 +8,6 @@ license = { text = "Apache-2.0" }
 authors = [{ name = "Eric Thomas" }]
 keywords = ["dagster", "compass", "llm", "ai", "pipelines"]
 classifiers = [
-    "Framework :: Dagster",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
