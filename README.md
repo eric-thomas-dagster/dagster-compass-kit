@@ -27,7 +27,7 @@ an official Dagster Labs product.
 | **`compass.conversation()`** | Multi-turn chat — `chat_id` is preserved across `chat.ask(...)` calls so follow-ups stay coherent. |
 | **`compass_on_failure()` hook** | On op failure, Compass writes a post-mortem and attaches it to run metadata. Dagster+'s existing Slack/email alerts link to the run page where it renders — this hook doesn't duplicate notifications. |
 | **`compass_create_issue_on_failure()` hook** | On op failure, Compass first checks the open Issues queue and decides: open a new pre-filled issue (title + description + severity + labels), link the run to an existing open issue covering the same failure, or skip filing entirely if the queue is already noisy. Linked to the run + the Compass chat that drafted it. Dedup is on by default — flooding the queue with duplicates is the failure mode this hook is designed to *not* have. |
-| **`compass_classify_cascade_on_failure()` sensor** | Alert-fatigue killer. On run failure, Compass splits the affected assets into `root_cause` vs `cascade` (downstreams that never ran because upstream failed). Emits an `AssetObservation` per affected asset with `compass_root_cause: true/false` as event metadata. Configure your Dagster+ alert policy to filter on that metadata and a 40-asset cascade pages once, not 40 times. |
+| **`compass_classify_cascade_on_failure()` sensor** | Alert-fatigue killer. On run failure, splits affected assets into `root_cause` vs `cascade` by walking the asset graph (deterministic, 100% accurate, no Compass call needed for classification). Emits an `AssetObservation` per asset with `compass_root_cause: true/false` as event metadata. Compass, when configured, enriches the explanation with a one-sentence narrative of what actually went wrong. Configure your Dagster+ alert policy to filter on the metadata and a 40-asset cascade pages once, not 40 times. |
 | **`@compass_retry_advisor()` decorator** | On exception, Compass decides whether to retry (transient) or terminate (deterministic). |
 | **`compass_asset_check(...)`** | Natural-language asset checks — "is this materialization anomalous?" becomes a first-class Dagster check. |
 | **`compass_sensor(...)`** | Autonomous monitoring — sensor asks Compass each tick whether to launch a job. |
@@ -210,11 +210,19 @@ defs = Definitions(
 On every failed run the sensor:
 
 1. Walks the event log for planned-but-unmaterialized assets.
-2. Asks Compass to classify each as **root cause** or **cascade**.
-3. Emits an `AssetObservation` on each affected asset carrying
+2. **Classifies them deterministically** from the asset graph: any
+   affected asset whose declared upstreams are all healthy is a root
+   cause; anything downstream of a failed asset is cascade. This is
+   100% accurate — no LLM involved, no network call.
+3. If Compass is configured and reachable, asks it for a one-sentence
+   explanation of what happened and substitutes that into the
+   observation's `compass_explanation` field. If Compass is not
+   configured or errors, a generic deterministic explanation is used
+   and the sensor moves on.
+4. Emits an `AssetObservation` on each affected asset carrying
    `compass_root_cause: true|false` as **event metadata** (plus
-   `compass_explanation`, `compass_run_id`, `compass_chat_id` for the
-   on-call).
+   `compass_explanation`, `compass_run_id`, `compass_chat_id` when
+   Compass was involved).
 
 Then, in Dagster+:
 

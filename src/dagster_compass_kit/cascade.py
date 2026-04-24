@@ -42,7 +42,7 @@ and filter the event metadata to ``compass_root_cause == true``.
 
 from __future__ import annotations
 
-from typing import Any, Iterable, Optional
+from typing import Any, Optional
 
 from dagster import (
     AssetKey,
@@ -56,40 +56,26 @@ from dagster import (
 
 from .models import CascadeDiagnosis
 from .resource import CompassNotConfiguredError, CompassResource
-from .structured import CompassSchemaError
 
 
-_CASCADE_PROMPT_TEMPLATE = """\
-A Dagster run just failed. It planned to materialize these assets:
+_ENRICH_PROMPT_TEMPLATE = """\
+A Dagster run just failed. I've already classified the affected assets
+deterministically from the asset graph:
 
-{planned_assets}
+Root cause asset(s) (failed on their own, nothing upstream failed):
+{root_cause_assets}
 
-Only these assets actually materialized successfully:
+Cascade asset(s) (didn't run because an upstream failed):
+{cascade_assets}
 
-{materialized_assets}
-
-So these assets either raised an error or were skipped because an
-upstream dependency failed:
-
-{failed_or_skipped_assets}
-
-The step-level errors were:
+The step-level errors that fired were:
 
 {step_errors}
 
-Please classify each unsuccessful asset as either ROOT_CAUSE or CASCADE:
-
-- ROOT_CAUSE: the asset whose materialization raised the error, or the
-  clear originating cause of the cascade.
-- CASCADE: the asset didn't run because an upstream failed — it is
-  downstream noise, not an independent cause.
-
-Usually one root cause explains everything else. Occasionally a run has
-two or more genuinely independent root causes (e.g. two parallel
-branches both failed for different reasons). Err toward fewer
-root causes — when in doubt, classify as CASCADE.
-
-Use the asset keys exactly as shown above (slash-separated).
+Please write ONE SENTENCE summarizing what happened and why, suitable
+for a Dagster+ asset observation alert. Mention the root cause asset(s)
+by name, what went wrong, and (if relevant) that N downstream assets
+were affected. No preamble, no bullet points — just the sentence.
 """
 
 
@@ -133,46 +119,143 @@ def _extract_asset_events(
     return planned, materialized, step_errors
 
 
-def classify_cascade_for_run(
+def classify_cascade_deterministic(
+    *,
+    planned: set[AssetKey],
+    materialized: set[AssetKey],
+    asset_graph: Any,
+) -> Optional[CascadeDiagnosis]:
+    """Pure-graph classifier — no Compass, 100% accurate.
+
+    An affected asset (planned but not materialized) is classified as:
+
+    - **CASCADE** if at least one of its declared upstream assets is
+      also in the affected set. It didn't run because something
+      upstream failed.
+    - **ROOT CAUSE** otherwise. It failed on its own — all its declared
+      upstreams either materialized successfully or weren't part of
+      this run.
+
+    This rule is deterministic and exact for the alerting use case,
+    because Dagster skips downstream assets when an upstream step
+    fails; it does not attempt them. There is no ambiguity.
+
+    Returns ``None`` if no assets were affected (i.e. the run failed
+    for some non-asset reason — nothing to classify).
+
+    The ``explanation`` field is a generic one-liner. Pass the result
+    through :func:`enrich_explanation_via_compass` for a
+    Compass-generated narrative that references the actual failure.
+    """
+    affected = planned - materialized
+    if not affected:
+        return None
+
+    roots: list[str] = []
+    cascades: list[str] = []
+    for key in sorted(affected, key=lambda k: k.to_user_string()):
+        try:
+            parents: set[AssetKey] = set(asset_graph.get(key).parent_keys)
+        except KeyError:
+            # Asset not in the graph anymore (removed? external?). Treat as root.
+            parents = set()
+        if parents & affected:
+            cascades.append(key.to_user_string())
+        else:
+            roots.append(key.to_user_string())
+
+    if len(roots) == 1:
+        summary = f"Deterministic classification: {roots[0]} is the root cause"
+    else:
+        summary = f"Deterministic classification: {len(roots)} root cause(s)"
+    if cascades:
+        summary += f"; {len(cascades)} downstream asset(s) did not run."
+    else:
+        summary += "."
+
+    return CascadeDiagnosis(
+        root_cause_asset_keys=roots,
+        cascade_asset_keys=cascades,
+        explanation=summary,
+    )
+
+
+def enrich_explanation_via_compass(
     compass: CompassResource,
+    diagnosis: CascadeDiagnosis,
+    *,
+    step_errors: list[str],
+) -> tuple[CascadeDiagnosis, Optional[int]]:
+    """Replace the deterministic explanation with a Compass-generated narrative.
+
+    The classification itself (root vs cascade) is not changed —
+    deterministic is authoritative. This only rewrites ``explanation``.
+
+    Raises the underlying Compass exception (``CompassNotConfiguredError``
+    or otherwise) on any failure. Callers typically catch-and-continue
+    to keep the deterministic explanation.
+    """
+    prompt = _ENRICH_PROMPT_TEMPLATE.format(
+        root_cause_assets="\n".join(
+            f"- {k}" for k in diagnosis.root_cause_asset_keys
+        ) or "(none)",
+        cascade_assets="\n".join(
+            f"- {k}" for k in diagnosis.cascade_asset_keys
+        ) or "(none)",
+        step_errors="\n".join(step_errors) or "(none captured)",
+    )
+    with compass.conversation() as chat:
+        response = chat.ask(prompt)
+        if response.error or not response.text:
+            raise RuntimeError(
+                f"Compass returned no explanation: {response.error or 'empty'}"
+            )
+        enriched_text = response.text.strip()[:500]
+        enriched = diagnosis.model_copy(update={"explanation": enriched_text})
+        return enriched, (chat.chat_id or None)
+
+
+def classify_cascade_for_run(
     *,
     run_id: str,
     instance: Any,
+    asset_graph: Any,
+    compass: Optional[CompassResource] = None,
 ) -> tuple[Optional[CascadeDiagnosis], Optional[int]]:
-    """Ask Compass to classify a failed run's affected assets as root-or-cascade.
+    """Classify a failed run's affected assets as root-cause vs cascade.
 
-    Returns ``(diagnosis, chat_id)``. Either may be ``None`` on failure —
-    same permissive pattern as :func:`draft_issue_for_failure`.
+    Deterministic-first: the classification itself is always done by
+    :func:`classify_cascade_deterministic` (no LLM, 100% accurate). If
+    a ``compass`` resource is provided *and* is configured, the
+    deterministic explanation is replaced with a Compass-generated
+    narrative. Any Compass failure is swallowed and the deterministic
+    explanation is kept.
+
+    Returns ``(diagnosis, chat_id)``. ``diagnosis`` is ``None`` only
+    when no assets were affected (nothing to classify). ``chat_id`` is
+    ``None`` unless Compass enrichment succeeded.
     """
     planned, materialized, step_errors = _extract_asset_events(instance, run_id)
-    failed_or_skipped = planned - materialized
-
-    if not failed_or_skipped:
-        # Run failed but not via asset materialization — nothing to classify
+    diagnosis = classify_cascade_deterministic(
+        planned=planned,
+        materialized=materialized,
+        asset_graph=asset_graph,
+    )
+    if diagnosis is None:
         return None, None
 
-    def _fmt(keys: Iterable[AssetKey]) -> str:
-        return "\n".join(f"- {k.to_user_string()}" for k in sorted(keys, key=lambda x: x.to_user_string())) or "(none)"
-
-    prompt = _CASCADE_PROMPT_TEMPLATE.format(
-        planned_assets=_fmt(planned),
-        materialized_assets=_fmt(materialized),
-        failed_or_skipped_assets=_fmt(failed_or_skipped),
-        step_errors="\n".join(step_errors) or "(none captured)",
-    )
+    if compass is None:
+        return diagnosis, None
 
     try:
-        with compass.conversation() as chat:
-            try:
-                diagnosis = chat.ask_structured(prompt, schema=CascadeDiagnosis)
-                return diagnosis, (chat.chat_id or None)
-            except CompassSchemaError:
-                return None, (chat.chat_id or None)
+        return enrich_explanation_via_compass(
+            compass, diagnosis, step_errors=step_errors
+        )
     except CompassNotConfiguredError:
-        # Bubble up — the sensor logs a distinct message for this case.
+        # Signal distinctly so the sensor can log the not-configured case.
         raise
-    except Exception:  # noqa: BLE001 - AI outage must never mask the underlying run failure
-        return None, None
+    except Exception:  # noqa: BLE001 - AI outage must never mask the deterministic answer
+        return diagnosis, None
 
 
 def _emit_classification_observations(
@@ -289,25 +372,39 @@ def compass_classify_cascade_on_failure(
         run = context.dagster_run
         run_id = run.run_id
         instance = context.instance
+        asset_graph = context.repository_def.asset_graph if context.repository_def else None
+
+        if asset_graph is None:
+            context.log.warning(
+                f"compass_cascade_classifier: no asset graph available for "
+                f"run {run_id}; cannot classify."
+            )
+            return SkipReason("Asset graph unavailable.")
 
         try:
             diagnosis, chat_id = classify_cascade_for_run(
-                compass, run_id=run_id, instance=instance
+                run_id=run_id,
+                instance=instance,
+                asset_graph=asset_graph,
+                compass=compass,
             )
-        except CompassNotConfiguredError as e:
-            context.log.warning(
-                f"compass_cascade_classifier: Compass is not configured "
-                f"(run {run_id}). Skipping classification. {e}"
+        except CompassNotConfiguredError:
+            # Compass env vars unset — fall back to deterministic-only.
+            context.log.info(
+                f"compass_cascade_classifier: Compass not configured; "
+                f"using deterministic classifier only for run {run_id}."
             )
-            return SkipReason(
-                "Compass not configured — set DAGSTER_CLOUD_URL and "
-                "DAGSTER_CLOUD_API_TOKEN, then restart."
+            diagnosis, chat_id = classify_cascade_for_run(
+                run_id=run_id,
+                instance=instance,
+                asset_graph=asset_graph,
+                compass=None,
             )
 
         if diagnosis is None:
             context.log.info(
-                f"compass_cascade_classifier: no classification for run {run_id} "
-                "(no affected assets, or Compass unavailable)"
+                f"compass_cascade_classifier: no affected assets for run "
+                f"{run_id}; nothing to classify."
             )
             return SkipReason("No cascade classification produced.")
 

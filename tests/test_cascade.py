@@ -1,18 +1,32 @@
 """Smoke tests for the cascade-classification surface.
 
-Real behavior (Compass call + observation emission) is exercised against
-a live Dagster+ tenant in the integration suite. These verify the shapes
-and that the sensor factory returns something Dagster will accept.
+The deterministic classifier is covered exhaustively here. Real Compass
+enrichment is exercised in the integration suite against a live tenant —
+these tests verify shape, topology rules, and the graceful-fallback paths.
 """
 
-from dagster import AssetKey, AssetObservation, DagsterInstance, MetadataValue
+import pytest
+from dagster import (
+    AssetKey,
+    AssetObservation,
+    DagsterInstance,
+    Definitions,
+    MetadataValue,
+    asset,
+)
+from pydantic import ValidationError
 
 from dagster_compass_kit import (
     CascadeDiagnosis,
+    classify_cascade_deterministic,
     classify_cascade_for_run,
     compass_classify_cascade_on_failure,
+    enrich_explanation_via_compass,
 )
 from dagster_compass_kit.cascade import _emit_classification_observations
+
+
+# ── Schema smoke ────────────────────────────────────────────────────────────
 
 
 def test_cascade_diagnosis_defaults():
@@ -25,21 +39,21 @@ def test_cascade_diagnosis_defaults():
 
 
 def test_cascade_diagnosis_requires_root_cause_keys():
-    """root_cause_asset_keys has no default — the caller (Compass) must provide it."""
-    import pytest
-    from pydantic import ValidationError
-
     with pytest.raises(ValidationError):
         CascadeDiagnosis(explanation="x")
 
 
-def test_classify_cascade_for_run_is_importable():
+# ── Surface smoke ───────────────────────────────────────────────────────────
+
+
+def test_exports_are_importable():
     assert callable(classify_cascade_for_run)
+    assert callable(classify_cascade_deterministic)
+    assert callable(enrich_explanation_via_compass)
 
 
 def test_sensor_factory_returns_sensor():
     sensor = compass_classify_cascade_on_failure()
-    # SensorDefinition / @run_failure_sensor objects have a `name` attribute
     assert hasattr(sensor, "name")
     assert sensor.name == "compass_cascade_classifier"
 
@@ -53,8 +67,138 @@ def test_sensor_factory_accepts_custom_name_and_metadata_keys():
     assert sensor.name == "my_cascade"
 
 
+# ── Deterministic classifier — topology rules ───────────────────────────────
+
+
+def _asset_graph(assets_defs):
+    """Helper: build an asset graph from a list of @asset-decorated functions."""
+    return Definitions(assets=assets_defs).get_repository_def().asset_graph
+
+
+def test_deterministic_returns_none_when_nothing_affected():
+    @asset
+    def a() -> int:
+        return 1
+
+    ag = _asset_graph([a])
+    planned = {AssetKey(["a"])}
+    materialized = {AssetKey(["a"])}
+    assert (
+        classify_cascade_deterministic(
+            planned=planned, materialized=materialized, asset_graph=ag
+        )
+        is None
+    )
+
+
+def test_deterministic_linear_cascade_single_root():
+    """a -> b -> c -> d, a fails. Expect 1 root, 3 cascade."""
+
+    @asset
+    def a() -> int:
+        return 1
+
+    @asset(deps=[a])
+    def b() -> int:
+        return 2
+
+    @asset(deps=[b])
+    def c() -> int:
+        return 3
+
+    @asset(deps=[c])
+    def d() -> int:
+        return 4
+
+    ag = _asset_graph([a, b, c, d])
+    planned = {AssetKey([k]) for k in "abcd"}
+    materialized: set[AssetKey] = set()
+
+    diagnosis = classify_cascade_deterministic(
+        planned=planned, materialized=materialized, asset_graph=ag
+    )
+    assert diagnosis is not None
+    assert diagnosis.root_cause_asset_keys == ["a"]
+    assert sorted(diagnosis.cascade_asset_keys) == ["b", "c", "d"]
+
+
+def test_deterministic_multiple_independent_roots():
+    """a -> c, b -> c; both a and b fail. Expect 2 roots, 1 cascade."""
+
+    @asset
+    def a() -> int:
+        return 1
+
+    @asset
+    def b() -> int:
+        return 2
+
+    @asset(deps=[a, b])
+    def c() -> int:
+        return 3
+
+    ag = _asset_graph([a, b, c])
+    planned = {AssetKey(["a"]), AssetKey(["b"]), AssetKey(["c"])}
+    materialized: set[AssetKey] = set()
+
+    diagnosis = classify_cascade_deterministic(
+        planned=planned, materialized=materialized, asset_graph=ag
+    )
+    assert diagnosis is not None
+    assert sorted(diagnosis.root_cause_asset_keys) == ["a", "b"]
+    assert diagnosis.cascade_asset_keys == ["c"]
+
+
+def test_deterministic_one_of_two_parallel_upstreams_fails():
+    """a -> c, b -> c; a fails, b succeeds -> c skipped. Expect 1 root (a), 1 cascade (c)."""
+
+    @asset
+    def a() -> int:
+        return 1
+
+    @asset
+    def b() -> int:
+        return 2
+
+    @asset(deps=[a, b])
+    def c() -> int:
+        return 3
+
+    ag = _asset_graph([a, b, c])
+    planned = {AssetKey(["a"]), AssetKey(["b"]), AssetKey(["c"])}
+    materialized = {AssetKey(["b"])}
+
+    diagnosis = classify_cascade_deterministic(
+        planned=planned, materialized=materialized, asset_graph=ag
+    )
+    assert diagnosis is not None
+    assert diagnosis.root_cause_asset_keys == ["a"]
+    assert diagnosis.cascade_asset_keys == ["c"]
+
+
+def test_deterministic_explanation_mentions_root_when_single():
+    @asset
+    def orders() -> int:
+        return 1
+
+    @asset(deps=[orders])
+    def downstream() -> int:
+        return 2
+
+    ag = _asset_graph([orders, downstream])
+    diagnosis = classify_cascade_deterministic(
+        planned={AssetKey(["orders"]), AssetKey(["downstream"])},
+        materialized=set(),
+        asset_graph=ag,
+    )
+    assert diagnosis is not None
+    assert "orders" in diagnosis.explanation
+
+
+# ── Observation emission ────────────────────────────────────────────────────
+
+
 def test_emit_classification_observations_writes_one_obs_per_asset():
-    """Happy-path: 1 root + 2 cascade → 3 AssetObservations reported to instance."""
     instance = DagsterInstance.ephemeral()
     diagnosis = CascadeDiagnosis(
         root_cause_asset_keys=["analytics/orders"],
@@ -83,7 +227,6 @@ def test_emit_classification_observations_writes_one_obs_per_asset():
     assert cascade == 2
     assert len(captured) == 3
 
-    # Root-cause observation carries compass_root_cause=True; cascade carries False.
     root_obs = next(o for o in captured if o.asset_key == AssetKey(["analytics", "orders"]))
     cascade_obs = next(
         o for o in captured if o.asset_key == AssetKey(["analytics", "orders_by_day"])
@@ -93,12 +236,10 @@ def test_emit_classification_observations_writes_one_obs_per_asset():
     assert cascade_obs.metadata["compass_cascade_of"] == MetadataValue.text(
         "analytics/orders"
     )
-    # Chat id rides along on both
     assert root_obs.metadata["compass_chat_id"] == MetadataValue.int(12345)
 
 
 def test_emit_classification_with_no_chat_id_omits_field():
-    """Chat id is optional — observations should emit cleanly without it."""
     instance = DagsterInstance.ephemeral()
     diagnosis = CascadeDiagnosis(
         root_cause_asset_keys=["x/y"],

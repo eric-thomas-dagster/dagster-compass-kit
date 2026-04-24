@@ -147,6 +147,23 @@ def fetch_orders(context): ...
 
 See `heuristic_classify()` in `retry.py` for the fallback table.
 
+### 5a. Cascade classification is deterministic
+
+The cascade classifier does NOT depend on Compass to decide root-vs-cascade.
+It walks the asset graph: an affected asset is CASCADE iff at least one of
+its declared upstreams is also in the affected set; otherwise ROOT. This is
+exact for the alerting use case — Dagster skips downstream assets when an
+upstream step fails, so topology fully determines the answer.
+
+Compass's role is limited to *enriching the explanation* — turning
+"Deterministic classification: orders is the root cause; 3 downstream
+asset(s) did not run." into "Snowflake auth expired at 14:03; orders and
+its three daily-rollup downstreams were affected." The classification
+itself — which is what the alert policy filters on — is LLM-free.
+
+This means the kit is usable (and the alert-fatigue benefit ships) even
+on tenants where Compass is disabled or the feature flag is off.
+
 ### 5b. Compass can query open Dagster+ Issues for dedup
 
 The dedup mode of `compass_create_issue_on_failure` (the default) asks

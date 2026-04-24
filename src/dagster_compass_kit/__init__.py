@@ -6,8 +6,10 @@ standalone compass.dagster.io.
 """
 
 from .cascade import (
+    classify_cascade_deterministic,
     classify_cascade_for_run,
     compass_classify_cascade_on_failure,
+    enrich_explanation_via_compass,
 )
 from .checks import compass_asset_check
 from .client import (
@@ -74,6 +76,8 @@ __all__ = [
     "IssueMutationSpec",
     "compass_classify_cascade_on_failure",
     "classify_cascade_for_run",
+    "classify_cascade_deterministic",
+    "enrich_explanation_via_compass",
     # Structured responses
     "build_structured_prompt",
     "parse_structured",
@@ -100,4 +104,4 @@ __all__ = [
     "stream_ai_summary_for_asset",
 ]
 
-__version__ = "0.2.2"
+__version__ = "0.3.0"
